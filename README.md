@@ -1,6 +1,6 @@
 # Detector Calibration GUI 
 
-A modern, user-friendly graphical interface for Detector Calibration and Resolution calculations and plotting with an auto peak detection feature and functional user override to assign ADC and Energy values. 
+A modern, user-friendly graphical interface for Detector Calibration, Resolution calculations and plotting with an auto peak detection feature and functional user override to assign ADC and Energy values. 
 
 ![Version](https://img.shields.io/badge/version-1.0-blue)
 ![PyROOT](https://img.shields.io/badge/PyROOT-green)
