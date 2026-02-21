@@ -1,0 +1,218 @@
+# ============================================================
+# DetectorCalibGUI — Energy Calibration Results
+# Author: Siddharth Parashari
+# ============================================================
+# Date          : 2026-02-21  13:40:32
+# Source file   : /home/siddharth/IFIC_Work/My_Codes/DetectorCalibGUI/test_detector_data.root
+# Total channels: 16
+# Good channels : 16
+# Bad channels  : 0
+#
+
+# ──────────────────────────────────────────────────────────
+# Channel 0
+# Model   : E = P0 + P1·Q
+# Chi2/NDF: nan  (Chi2=0.000, NDF=0)
+#
+# Parameters:
+#   P0 = +7.90503082e+00  ±  inf
+#   P1 = +4.87750343e-01  ±  inf
+#
+#   ADC_position    Energy_keV    Residual_keV
+       1031.4600       511.000        +0.00000
+       2596.8100      1274.500        -0.00000
+
+# ──────────────────────────────────────────────────────────
+# Channel 1
+# Model   : E = P0 + P1·Q
+# Chi2/NDF: nan  (Chi2=0.000, NDF=0)
+#
+# Parameters:
+#   P0 = +7.90503082e+00  ±  inf
+#   P1 = +4.87750343e-01  ±  inf
+#
+#   ADC_position    Energy_keV    Residual_keV
+       1031.4600       511.000        +0.00000
+       2596.8100      1274.500        -0.00000
+
+# ──────────────────────────────────────────────────────────
+# Channel 2
+# Model   : E = P0 + P1·Q
+# Chi2/NDF: nan  (Chi2=0.000, NDF=0)
+#
+# Parameters:
+#   P0 = +7.90503082e+00  ±  inf
+#   P1 = +4.87750343e-01  ±  inf
+#
+#   ADC_position    Energy_keV    Residual_keV
+       1031.4600       511.000        +0.00000
+       2596.8100      1274.500        -0.00000
+
+# ──────────────────────────────────────────────────────────
+# Channel 3
+# Model   : E = P0 + P1·Q
+# Chi2/NDF: nan  (Chi2=0.000, NDF=0)
+#
+# Parameters:
+#   P0 = +7.90503082e+00  ±  inf
+#   P1 = +4.87750343e-01  ±  inf
+#
+#   ADC_position    Energy_keV    Residual_keV
+       1031.4600       511.000        +0.00000
+       2596.8100      1274.500        -0.00000
+
+# ──────────────────────────────────────────────────────────
+# Channel 4
+# Model   : E = P0 + P1·Q
+# Chi2/NDF: nan  (Chi2=0.000, NDF=0)
+#
+# Parameters:
+#   P0 = +7.90503082e+00  ±  inf
+#   P1 = +4.87750343e-01  ±  inf
+#
+#   ADC_position    Energy_keV    Residual_keV
+       1031.4600       511.000        +0.00000
+       2596.8100      1274.500        -0.00000
+
+# ──────────────────────────────────────────────────────────
+# Channel 5
+# Model   : E = P0 + P1·Q
+# Chi2/NDF: nan  (Chi2=0.000, NDF=0)
+#
+# Parameters:
+#   P0 = +7.90503082e+00  ±  inf
+#   P1 = +4.87750343e-01  ±  inf
+#
+#   ADC_position    Energy_keV    Residual_keV
+       1031.4600       511.000        +0.00000
+       2596.8100      1274.500        -0.00000
+
+# ──────────────────────────────────────────────────────────
+# Channel 6
+# Model   : E = P0 + P1·Q
+# Chi2/NDF: nan  (Chi2=0.000, NDF=0)
+#
+# Parameters:
+#   P0 = +7.90503082e+00  ±  inf
+#   P1 = +4.87750343e-01  ±  inf
+#
+#   ADC_position    Energy_keV    Residual_keV
+       1031.4600       511.000        +0.00000
+       2596.8100      1274.500        -0.00000
+
+# ──────────────────────────────────────────────────────────
+# Channel 7
+# Model   : E = P0 + P1·Q
+# Chi2/NDF: nan  (Chi2=0.000, NDF=0)
+#
+# Parameters:
+#   P0 = +7.90503082e+00  ±  inf
+#   P1 = +4.87750343e-01  ±  inf
+#
+#   ADC_position    Energy_keV    Residual_keV
+       1031.4600       511.000        +0.00000
+       2596.8100      1274.500        -0.00000
+
+# ──────────────────────────────────────────────────────────
+# Channel 8
+# Model   : E = P0 + P1·Q
+# Chi2/NDF: nan  (Chi2=0.000, NDF=0)
+#
+# Parameters:
+#   P0 = +7.90503082e+00  ±  inf
+#   P1 = +4.87750343e-01  ±  inf
+#
+#   ADC_position    Energy_keV    Residual_keV
+       1031.4600       511.000        +0.00000
+       2596.8100      1274.500        -0.00000
+
+# ──────────────────────────────────────────────────────────
+# Channel 9
+# Model   : E = P0 + P1·Q
+# Chi2/NDF: nan  (Chi2=0.000, NDF=0)
+#
+# Parameters:
+#   P0 = +7.90503082e+00  ±  inf
+#   P1 = +4.87750343e-01  ±  inf
+#
+#   ADC_position    Energy_keV    Residual_keV
+       1031.4600       511.000        +0.00000
+       2596.8100      1274.500        -0.00000
+
+# ──────────────────────────────────────────────────────────
+# Channel 10
+# Model   : E = P0 + P1·Q
+# Chi2/NDF: nan  (Chi2=0.000, NDF=0)
+#
+# Parameters:
+#   P0 = +7.90503082e+00  ±  inf
+#   P1 = +4.87750343e-01  ±  inf
+#
+#   ADC_position    Energy_keV    Residual_keV
+       1031.4600       511.000        +0.00000
+       2596.8100      1274.500        -0.00000
+
+# ──────────────────────────────────────────────────────────
+# Channel 11
+# Model   : E = P0 + P1·Q
+# Chi2/NDF: nan  (Chi2=0.000, NDF=0)
+#
+# Parameters:
+#   P0 = +7.90503082e+00  ±  inf
+#   P1 = +4.87750343e-01  ±  inf
+#
+#   ADC_position    Energy_keV    Residual_keV
+       1031.4600       511.000        +0.00000
+       2596.8100      1274.500        -0.00000
+
+# ──────────────────────────────────────────────────────────
+# Channel 12
+# Model   : E = P0 + P1·Q
+# Chi2/NDF: nan  (Chi2=0.000, NDF=0)
+#
+# Parameters:
+#   P0 = +7.90503082e+00  ±  inf
+#   P1 = +4.87750343e-01  ±  inf
+#
+#   ADC_position    Energy_keV    Residual_keV
+       1031.4600       511.000        +0.00000
+       2596.8100      1274.500        -0.00000
+
+# ──────────────────────────────────────────────────────────
+# Channel 13
+# Model   : E = P0 + P1·Q
+# Chi2/NDF: nan  (Chi2=0.000, NDF=0)
+#
+# Parameters:
+#   P0 = +7.90503082e+00  ±  inf
+#   P1 = +4.87750343e-01  ±  inf
+#
+#   ADC_position    Energy_keV    Residual_keV
+       1031.4600       511.000        +0.00000
+       2596.8100      1274.500        -0.00000
+
+# ──────────────────────────────────────────────────────────
+# Channel 14
+# Model   : E = P0 + P1·Q
+# Chi2/NDF: nan  (Chi2=0.000, NDF=0)
+#
+# Parameters:
+#   P0 = +7.90503082e+00  ±  inf
+#   P1 = +4.87750343e-01  ±  inf
+#
+#   ADC_position    Energy_keV    Residual_keV
+       1031.4600       511.000        +0.00000
+       2596.8100      1274.500        -0.00000
+
+# ──────────────────────────────────────────────────────────
+# Channel 15
+# Model   : E = P0 + P1·Q
+# Chi2/NDF: nan  (Chi2=0.000, NDF=0)
+#
+# Parameters:
+#   P0 = +7.90503082e+00  ±  inf
+#   P1 = +4.87750343e-01  ±  inf
+#
+#   ADC_position    Energy_keV    Residual_keV
+       1031.4600       511.000        +0.00000
+       2596.8100      1274.500        -0.00000

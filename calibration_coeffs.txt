@@ -1,0 +1,25 @@
+# ============================================================
+# DetectorCalibGUI — Energy Calibration Results
+# Author: Siddharth Parashari
+# ============================================================
+# Date     : 2026-02-21  13:40:32
+# Source   : /home/siddharth/IFIC_Work/My_Codes/DetectorCalibGUI/test_detector_data.root
+# Model    : E = P0 + P1·Q
+#
+#  Channel                  P0                  P1            Chi2/NDF  Status
+         0      7.90503082e+00      4.87750343e-01                 nan  OK
+         1      7.90503082e+00      4.87750343e-01                 nan  OK
+         2      7.90503082e+00      4.87750343e-01                 nan  OK
+         3      7.90503082e+00      4.87750343e-01                 nan  OK
+         4      7.90503082e+00      4.87750343e-01                 nan  OK
+         5      7.90503082e+00      4.87750343e-01                 nan  OK
+         6      7.90503082e+00      4.87750343e-01                 nan  OK
+         7      7.90503082e+00      4.87750343e-01                 nan  OK
+         8      7.90503082e+00      4.87750343e-01                 nan  OK
+         9      7.90503082e+00      4.87750343e-01                 nan  OK
+        10      7.90503082e+00      4.87750343e-01                 nan  OK
+        11      7.90503082e+00      4.87750343e-01                 nan  OK
+        12      7.90503082e+00      4.87750343e-01                 nan  OK
+        13      7.90503082e+00      4.87750343e-01                 nan  OK
+        14      7.90503082e+00      4.87750343e-01                 nan  OK
+        15      7.90503082e+00      4.87750343e-01                 nan  OK

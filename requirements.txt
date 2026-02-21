@@ -1,0 +1,14 @@
+# Core GUI and science stack (required)
+PyQt5>=5.15
+matplotlib>=3.5
+numpy>=1.21
+scipy>=1.7
+
+# ROOT backend — install ONE of these:
+#
+# Option A: PyROOT (recommended — full ROOT support)
+#   Source your ROOT installation before running:
+#   source /path/to/root/bin/thisroot.sh
+#
+# Option B: uproot (no ROOT installation needed)
+#   pip install uproot awkward
