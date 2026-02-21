@@ -1,4 +1,4 @@
-# DetectorCalibGUI 
+# Detector Calibration GUI 
 
 A modern, user-friendly graphical interface for Detector Calibration and Resolution calculations and plotting with an auto peak detection feature and functional user override to assign ADC and Energy values. 
 
