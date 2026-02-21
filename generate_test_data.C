@@ -186,7 +186,7 @@ void generate_test_data()
     f->Close();
 
     // ── Summary ──────────────────────────────────────────────────────── //
-    std::cout << "\n✅  Written: " << OUTPUT_FILENAME << std::endl;
+    std::cout << "\n Written: " << OUTPUT_FILENAME << std::endl;
     std::cout << "   TTree   : 'detector_data'  ("
               << N_CHANNELS * EVENTS_PER_CHAN << " total events)" << std::endl;
     std::cout << "             Branches: channel_id, adc_value, timestamp\n";
