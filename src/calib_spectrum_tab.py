@@ -65,6 +65,20 @@ class CalibratedSpectrumTab(QWidget):
         src_box = QGroupBox("Calibration Source")
         src_l   = QHBoxLayout(src_box)
         self.btn_from_memory = QPushButton("📋  From Session")
+        self.btn_from_memory.setStyleSheet("""
+            QPushButton {
+                background-color: #2196F3;
+                color: white;
+                border-radius: 6px;
+                padding: 6px 12px;
+            }
+            QPushButton:hover {
+                background-color: #1976D2;
+            }
+            QPushButton:pressed {
+                background-color: #0D47A1;
+            }
+        """)
         self.btn_from_memory.setToolTip(
             "Use calibration from current fitting session")
         self.btn_from_memory.clicked.connect(self._load_from_memory)
@@ -108,6 +122,20 @@ class CalibratedSpectrumTab(QWidget):
         self.cb_channel.setMinimumWidth(120)
         self.cb_channel.currentIndexChanged.connect(self._on_channel_changed)
         self.btn_apply_all = QPushButton("Apply to All")
+        self.btn_apply_all.setStyleSheet("""
+            QPushButton {
+                background-color: #2196F3;
+                color: white;
+                border-radius: 6px;
+                padding: 6px 12px;
+            }
+            QPushButton:hover {
+                background-color: #1976D2;
+            }
+            QPushButton:pressed {
+                background-color: #0D47A1;
+            }
+        """)
         self.btn_apply_all.clicked.connect(self._apply_all)
         ch_l.addWidget(self.cb_channel)
         ch_l.addWidget(self.btn_apply_all)
@@ -115,8 +143,22 @@ class CalibratedSpectrumTab(QWidget):
 
         # Send to resolution tab
         self.btn_send_res = QPushButton("Analyse Resolution")
-        self.btn_send_res.setToolTip(
-            "Send this calibrated spectrum to the Resolution tab")
+        self.btn_send_res.setStyleSheet("""
+            QPushButton {
+                background-color: #2196F3;
+                color: white;
+                border-radius: 6px;
+                padding: 6px 12px;
+            }
+            QPushButton:hover {
+                background-color: #1976D2;
+            }
+            QPushButton:pressed {
+                background-color: #0D47A1;
+            }
+        """)
+        #self.btn_send_res.setToolTip(
+        #    "Send this calibrated spectrum to the Resolution tab")
         self.btn_send_res.clicked.connect(self._send_to_resolution)
         self.btn_send_res.setEnabled(False)
         ctrl.addWidget(self.btn_send_res)
@@ -149,7 +191,7 @@ class CalibratedSpectrumTab(QWidget):
         self.engine.load_from_memory(self.fit_results)
         n = len(self.engine.calib_params)
         self.lbl_calib_src.setText(
-            f"Session memory  ({n} channels calibrated)")
+            f"{n} channels calibrated")
         self._populate_channel_combo()
 
     def _load_from_file(self):

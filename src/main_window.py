@@ -681,8 +681,8 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(splitter, stretch=1)
 
         left = self._build_left_panel()
-        left.setMinimumWidth(240)
-        left.setMaximumWidth(300)
+        left.setMinimumWidth(300)
+        left.setMaximumWidth(400)
         splitter.addWidget(left)
 
         self.tabs = QTabWidget()
@@ -825,6 +825,11 @@ class MainWindow(QMainWindow):
         # ── Detected peaks table (assign energies) ─────────────────── #
         assign_box = QGroupBox("Assign Energies to Detected Peaks")
         assign_l   = QVBoxLayout(assign_box)
+        prop_info = QLabel(
+            "Toggle 🖱 Click to select peaks manually")
+        prop_info.setWordWrap(True)
+        prop_info.setStyleSheet("font-size: 10px; color: #556;")
+        assign_l.addWidget(prop_info)
 
         self.tbl_detected = QTableWidget(0, 3)
         self.tbl_detected.setHorizontalHeaderLabels(
@@ -857,6 +862,22 @@ class MainWindow(QMainWindow):
         ab.addWidget(self.btn_add_manual)
         ab.addWidget(self.btn_click_pk)
         assign_l.addLayout(ab)
+
+        self.btn_click_pk.setStyleSheet("""
+            QPushButton {
+                background-color: #2196F3;
+                color: white;
+                border-radius: 6px;
+                padding: 6px 12px;
+            }
+            QPushButton:hover {
+                background-color: #1976D2;
+            }
+            QPushButton:pressed {
+                background-color: #0D47A1;
+            }
+        """)
+
 
         layout.addWidget(assign_box)
 

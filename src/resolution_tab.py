@@ -103,6 +103,20 @@ class ResolutionTab(QWidget):
             "Nominal energy of this peak (used as label in results table)")
         fit_l.addWidget(self.sb_peak_label)
         self.btn_fit_peak = QPushButton("⚡  Fit Peak")
+        self.btn_fit_peak.setStyleSheet("""
+            QPushButton {
+                background-color: #2196F3;
+                color: white;
+                border-radius: 6px;
+                padding: 6px 12px;
+            }
+            QPushButton:hover {
+                background-color: #1976D2;
+            }
+            QPushButton:pressed {
+                background-color: #0D47A1;
+            }
+        """)
         self.btn_fit_peak.setEnabled(False)
         self.btn_fit_peak.clicked.connect(self._fit_selected_peak)
         fit_l.addWidget(self.btn_fit_peak)
@@ -163,6 +177,20 @@ class ResolutionTab(QWidget):
 
         btn_row = QHBoxLayout()
         self.btn_fit_all_ch = QPushButton("⚡  Fit All Channels (same range)")
+        self.btn_fit_all_ch.setStyleSheet("""
+            QPushButton {
+                background-color: #2196F3;
+                color: white;
+                border-radius: 6px;
+                padding: 6px 12px;
+            }
+            QPushButton:hover {
+                background-color: #1976D2;
+            }
+            QPushButton:pressed {
+                background-color: #0D47A1;
+            }
+        """)
         self.btn_fit_all_ch.setToolTip(
             "Apply the current fit range to the same peak "
             "across all channels that have calibrated spectra.")
