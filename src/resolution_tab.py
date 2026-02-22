@@ -226,19 +226,13 @@ class ResolutionTab(QWidget):
         self.canvas_trend = FigureCanvas(self.fig_trend)
         self.canvas_trend.setSizePolicy(
             QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.toolbar_trend = NavigationToolbar(self.canvas_trend, trend_widget)
+        trend_l.addWidget(self.toolbar_trend)
         trend_l.addWidget(self.canvas_trend)
         right_tabs.addTab(trend_widget, "📈 Resolution Trend")
 
         splitter.setSizes([600, 420])
         splitter.addWidget(right)
-
-        self.btn_fig_options = QPushButton("⚙ Figure Options")
-        self.btn_fig_options.clicked.connect(self._open_fig_options)
-        trend_ctrl.addWidget(self.btn_fig_options)
-
-        self.btn_save_trend = QPushButton("💾 Save Plot")
-        self.btn_save_trend.clicked.connect(self._save_trend_plot)
-        trend_ctrl.addWidget(self.btn_save_trend)
 
     # ------------------------------------------------------------------ #
     # Spectrum plotting + SpanSelector
@@ -578,8 +572,38 @@ class ResolutionTab(QWidget):
     # ------------------------------------------------------------------ #
 
     def _open_fig_options(self):
+        """Open matplotlib's built-in figure editor for the trend plot."""
         try:
             from matplotlib.backends.qt_editor.figureoptions import figure_edit
-            figure_edit(self.ax_trend, self)
         except Exception as e:
-            QMessageBox.warning(self, "Figure Options", str(e))        
+            QMessageBox.warning(self, "Not Available",
+                f"Could not load figure editor:\n{e}")
+            return
+
+        # figure_edit's apply_callback calls figure.canvas.toolbar.push_current()
+        # Our canvas has no toolbar attached via the standard mechanism, so we
+        # temporarily attach the existing NavigationToolbar to avoid the crash.
+        canvas = self.fig_trend.canvas
+        original_toolbar = getattr(canvas, 'toolbar', None)
+    
+        # Find the NavigationToolbar we already created for this canvas
+        # It's stored as self.toolbar_trend if it exists, otherwise attach a mock
+        nav_toolbar = getattr(self, 'toolbar_trend', None)
+    
+        if nav_toolbar is None:
+            # Create a minimal stub that satisfies figure_edit's requirements
+            class _ToolbarStub:
+                def push_current(self): pass
+                def home(self): pass
+                def back(self): pass
+                def forward(self): pass
+            nav_toolbar = _ToolbarStub()
+
+        canvas.toolbar = nav_toolbar
+        try:
+            figure_edit(self.ax_trend, self.canvas_trend)
+        except Exception as e:
+            QMessageBox.warning(self, "Figure Options Error", str(e))
+        finally:
+            # Restore original state
+            canvas.toolbar = original_toolbar
