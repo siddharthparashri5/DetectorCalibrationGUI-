@@ -204,6 +204,10 @@ class ResolutionTab(QWidget):
         splitter.setSizes([600, 420])
         splitter.addWidget(right)
 
+        self.btn_fig_options = QPushButton("⚙ Figure Options")
+        self.btn_fig_options.clicked.connect(self._open_fig_options)
+        trend_ctrl.addWidget(self.btn_fig_options)
+
         self.btn_save_trend = QPushButton("💾 Save Plot")
         self.btn_save_trend.clicked.connect(self._save_trend_plot)
         trend_ctrl.addWidget(self.btn_save_trend)
@@ -525,6 +529,10 @@ class ResolutionTab(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "Export Error", str(e))
 
+    # ------------------------------------------------------------------ #
+    # Export Resolution Plot
+    # ------------------------------------------------------------------ #
+
     def _save_trend_plot(self):
         path, selected_filter = QFileDialog.getSaveFileName(
             self, "Save Trend Plot", "resolution_trend.png",
@@ -536,3 +544,14 @@ class ResolutionTab(QWidget):
             QMessageBox.information(self, "Saved", f"Plot saved to:\n{path}")
         except Exception as e:
             QMessageBox.critical(self, "Save Error", str(e))
+
+    # ------------------------------------------------------------------ #
+    # Figure options for resolution plot
+    # ------------------------------------------------------------------ #
+
+    def _open_fig_options(self):
+        try:
+            from matplotlib.backends.qt_editor.figureoptions import figure_edit
+            figure_edit(self.ax_trend, self)
+        except Exception as e:
+            QMessageBox.warning(self, "Figure Options", str(e))        

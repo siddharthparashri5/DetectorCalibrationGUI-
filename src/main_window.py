@@ -381,7 +381,7 @@ class LoadDialog(QDialog):
         layout.addWidget(self.tree_group)
 
         # ── Channel range ────────────────────────────────────────────── #
-        self.ch_range_box = QGroupBox("Channel Range")
+        self.ch_range_box = QGroupBox("Channel Range (Only in Custom Draw Mode)")
         cr = QFormLayout(self.ch_range_box)
 
         range_h = QHBoxLayout()
@@ -468,7 +468,10 @@ class LoadDialog(QDialog):
         self.cb_channel_branch.setEnabled(is_filt)
         self.le_draw_custom.setEnabled(is_cust)
 
-        # For array/custom mode, channel range is required
+        # Channel range only needed for array and custom modes
+        # filter mode auto-discovers channels from data
+        self.ch_range_box.setVisible(is_arr or is_cust)
+
         hint = ""
         if is_arr:
             hint = "Array mode: set channel First/Last range below."
@@ -497,8 +500,12 @@ class LoadDialog(QDialog):
     def _toggle(self):
         use_tree = self.rb_tree.isChecked()
         self.tree_group.setVisible(use_tree)
-        self.ch_range_box.setVisible(use_tree)
         self.hist_group.setVisible(not use_tree)
+        # Re-apply draw mode visibility when switching between tree/hist
+        if use_tree:
+            self._on_draw_mode(self.cb_draw_mode.currentIndex())
+        else:
+            self.ch_range_box.setVisible(False)
 
     def _accept(self):
         if self.rb_tree.isChecked():

@@ -4,16 +4,21 @@ ROOTFileLoader
 Backends: PyROOT (preferred) or uproot (fallback).
 
 Draw modes for TTree loading:
-  filter   — Draw("energy", "channelID==N")          separate branches, cut per channel
-  array    — Draw("energy[channelID]")                array branch indexed by channel
-  custom   — user supplies draw_expr (%d = channel)  full control
-              e.g. "sqrt(energy[%d])" or "adc>>h(%d,cut)"
+  filter   — read both branches once, split per channel in numpy
+  array    — Draw("energy[N]") per channel (array-indexed branch)
+  custom   — user expression with %d replaced by channel number
 
 User controls:
-  channel_ids    — explicit list, or auto-discovered from data
-  ch_first/last/step — range specification
-  max_entries    — limit entries read per channel (0 = all)
-  n_bins         — histogram bins
+  channel_ids        — explicit list (overrides everything else)
+  ch_first/ch_last   — inclusive range  (ch_last == -1 → auto)
+  ch_step            — stride
+  max_entries        — cap events read  (0 = all)
+  n_bins             — histogram bins
+
+Channel-range resolution priority
+  1. Explicit channel_ids list
+  2. ch_first … ch_last range  (when ch_last >= ch_first)
+  3. Auto-discovered from data  (filter mode only)
 """
 
 from __future__ import annotations
@@ -59,6 +64,7 @@ def _find_root_python_path() -> Optional[str]:
                 return path
     return None
 
+
 def _detect_backend() -> str:
     global _BACKEND
     if _BACKEND:
@@ -74,8 +80,7 @@ def _detect_backend() -> str:
     root_py_path = _find_root_python_path()
     if root_py_path and root_py_path not in sys.path:
         sys.path.insert(0, root_py_path)
-        lib_dir = os.path.normpath(
-            os.path.join(root_py_path, "..", "lib"))
+        lib_dir = os.path.normpath(os.path.join(root_py_path, "..", "lib"))
         env_key = "DYLD_LIBRARY_PATH" if sys.platform == "darwin" \
                   else "LD_LIBRARY_PATH"
         old = os.environ.get(env_key, "")
@@ -105,17 +110,21 @@ def _detect_backend() -> str:
         f"Tried ROOT path: {root_py_path or 'not found'}"
     )
 
+
 def get_backend() -> str:
     return _detect_backend()
 
 
-# ── Draw mode constants ────────────────────────────────────────────────── #
+# ── Draw mode labels ───────────────────────────────────────────────────── #
 
 DRAW_MODES = {
-    "filter": 'Draw("energy", "channelID==N")  — separate branches, filter per channel',
-    "array":  'Draw("energy[channelID]")        — array branch indexed by channel',
+    "filter": 'Read both branches once, split per channel in numpy',
+    "array":  'Draw("energy[N]") — array branch indexed by channel',
     "custom": 'Custom expression  (%d replaced by channel number)',
 }
+
+# PyROOT: max entries per Draw() call to keep C-buffer bounded
+_PYROOT_CHUNK = 500_000
 
 
 # ── Data class ─────────────────────────────────────────────────────────── #
@@ -128,7 +137,7 @@ class ChannelSpectrum:
     counts:      np.ndarray
     n_entries:   int
     source:      str = "unknown"
-    draw_expr:   str = ""        # the actual Draw expression used
+    draw_expr:   str = ""
 
 
 # ── Loader ─────────────────────────────────────────────────────────────── #
@@ -136,11 +145,11 @@ class ChannelSpectrum:
 class ROOTFileLoader:
 
     def __init__(self):
-        self.filename: str = ""
-        self.mode:     str = ""
-        self.backend:  str = ""
+        self.filename:  str = ""
+        self.mode:      str = ""
+        self.backend:   str = ""
         self.draw_mode: str = "filter"
-        self.spectra: dict[int, ChannelSpectrum] = {}
+        self.spectra:   dict[int, ChannelSpectrum] = {}
         self._file = None
 
     # ------------------------------------------------------------------ #
@@ -150,10 +159,8 @@ class ROOTFileLoader:
     def open(self, filename: str) -> dict:
         self.filename = filename
         self.backend  = _detect_backend()
-        if self.backend == "pyroot":
-            return self._open_pyroot(filename)
-        else:
-            return self._open_uproot(filename)
+        return self._open_pyroot(filename) if self.backend == "pyroot" \
+               else self._open_uproot(filename)
 
     def load_from_th1(self, hist_names: Optional[list] = None):
         self.mode    = "th1"
@@ -175,21 +182,6 @@ class ROOTFileLoader:
                          ch_last:        int  = -1,
                          ch_step:        int  = 1,
                          max_entries:    int  = 0):
-        """
-        Load per-channel spectra from a TTree.
-
-        draw_mode:
-          "filter"  — Draw("adc_branch", "channel_branch==N")
-          "array"   — Draw("adc_branch[N]")   for array branches
-          "custom"  — custom_expr with %d replaced by channel number
-                      e.g.  "sqrt(energy[%d])"
-
-        channel_ids: explicit list of channel IDs to load.
-                     If None, use ch_first/ch_last/ch_step range,
-                     or auto-discover from data (filter mode only).
-
-        max_entries: max events to read per channel (0 = all).
-        """
         self.mode      = "ttree"
         self.draw_mode = draw_mode
         self.spectra   = {}
@@ -200,7 +192,6 @@ class ROOTFileLoader:
                 n_bins, draw_mode, custom_expr,
                 channel_ids, ch_first, ch_last, ch_step, max_entries)
         else:
-            # uproot only supports filter mode natively
             self._load_ttree_uproot(
                 tree_name, channel_branch, adc_branch,
                 n_bins, draw_mode, custom_expr,
@@ -224,27 +215,35 @@ class ROOTFileLoader:
             self._file = None
 
     # ------------------------------------------------------------------ #
-    # Channel ID resolution helper
+    # Channel ID resolution  —  THE critical fix
     # ------------------------------------------------------------------ #
 
-    def _resolve_channel_ids(self, channel_ids, ch_first, ch_last,
-                               ch_step, discovered: Optional[list]) -> list:
+    def _resolve_channel_ids(self,
+                              channel_ids: Optional[list],
+                              ch_first:    int,
+                              ch_last:     int,
+                              ch_step:     int,
+                              discovered:  Optional[list]) -> list:
         """
         Priority:
           1. Explicit channel_ids list
-          2. ch_first / ch_last / ch_step range  (if ch_last >= 0)
-          3. Auto-discovered from data
+          2. ch_first … ch_last inclusive range
+             Condition: ch_last >= ch_first  (old code used ch_last >= 0
+             which broke when ch_first > 0 and ch_last was left at -1)
+          3. Auto-discovered list from data
         """
         if channel_ids:
             return sorted(channel_ids)
-        if ch_last >= 0:
+        # Range is valid when the user actually set ch_last to something
+        # at or above ch_first.  ch_last == -1 is the "not set" sentinel.
+        if ch_last >= ch_first:
             return list(range(ch_first, ch_last + 1, max(1, ch_step)))
         if discovered:
             return sorted(discovered)
         return []
 
     # ================================================================== #
-    # PyROOT backend
+    # PyROOT — file open
     # ================================================================== #
 
     def _open_pyroot(self, filename: str) -> dict:
@@ -265,7 +264,7 @@ class ROOTFileLoader:
                 info["trees"].append({
                     "name":     name,
                     "branches": branches,
-                    "entries":  int(tree.GetEntries())
+                    "entries":  int(tree.GetEntries()),
                 })
             elif cls in ("TH1F", "TH1D", "TH1I", "TH1"):
                 h = self._file.Get(name)
@@ -274,9 +273,13 @@ class ROOTFileLoader:
                     "nbins":   h.GetNbinsX(),
                     "xmin":    h.GetXaxis().GetXmin(),
                     "xmax":    h.GetXaxis().GetXmax(),
-                    "entries": int(h.GetEntries())
+                    "entries": int(h.GetEntries()),
                 })
         return info
+
+    # ================================================================== #
+    # PyROOT — TH1
+    # ================================================================== #
 
     def _load_th1_pyroot(self, hist_names: Optional[list]):
         import re
@@ -298,6 +301,10 @@ class ROOTFileLoader:
                 bin_centers=centers, counts=counts,
                 n_entries=int(h.GetEntries()), source="th1")
 
+    # ================================================================== #
+    # PyROOT — TTree
+    # ================================================================== #
+
     def _load_ttree_pyroot(self, tree_name, channel_branch, adc_branch,
                             n_bins, draw_mode, custom_expr,
                             channel_ids, ch_first, ch_last, ch_step,
@@ -308,94 +315,158 @@ class ROOTFileLoader:
             raise ValueError(f"TTree '{tree_name}' not found.")
 
         ROOT.gROOT.cd()
-        entry_limit = int(max_entries) if max_entries > 0 else -1
+        n_total     = int(tree.GetEntries())
+        entry_limit = int(max_entries) if max_entries > 0 else n_total
 
-        # ── filter mode: Draw("adc", "channelID==N") ────────────────── #
+        # ── filter mode: single-pass, split in numpy ─────────────────── #
         if draw_mode == "filter":
-            # Auto-discover channel IDs if not specified
-            discovered = None
-            if not channel_ids and ch_last < 0:
-                n_total = int(tree.GetEntries())
-                tree.SetEstimate(n_total + 1)
-                n_drawn = tree.Draw(channel_branch, "", "goff",
-                                     entry_limit if entry_limit > 0
-                                     else n_total)
-                if n_drawn > 0:
-                    discovered = sorted(set(
-                        int(tree.GetV1()[i]) for i in range(n_drawn)))
+            ch_arr, adc_arr = self._pyroot_read_two_branches(
+                tree, channel_branch, adc_branch, entry_limit)
 
-            targets = self._resolve_channel_ids(
+            if len(ch_arr) == 0:
+                raise ValueError(
+                    f"No data read from '{channel_branch}' / '{adc_branch}'.")
+
+            discovered = sorted(set(ch_arr.tolist()))
+            targets    = self._resolve_channel_ids(
                 channel_ids, ch_first, ch_last, ch_step, discovered)
+
             if not targets:
                 raise ValueError(
-                    "No channels found. Set channel range manually.")
+                    "No target channels could be determined.\n"
+                    "Set First/Last channel in the load dialog, or leave "
+                    "both at default to auto-discover.")
 
-            for ch_id in targets:
-                cut   = f"{channel_branch}=={ch_id}"
-                limit = entry_limit if entry_limit > 0 else \
-                        int(tree.GetEntries())
-                tree.SetEstimate(limit + 1)
-                n = tree.Draw(adc_branch, cut, "goff", limit)
-                if n <= 0:
-                    continue
-                vals = np.array([tree.GetV1()[i] for i in range(n)])
-                self._fill_spectrum(ch_id, vals, n_bins,
-                                     draw_expr=f'Draw("{adc_branch}","{cut}")')
-
-        # ── array mode: Draw("energy[N]") ───────────────────────────── #
-        elif draw_mode == "array":
-            if ch_last < 0 and not channel_ids:
+            # Warn if some requested channels are absent in data
+            data_set = set(discovered)
+            present  = [c for c in targets if c in data_set]
+            if not present:
                 raise ValueError(
-                    "Array mode requires a channel range. "
-                    "Set First/Last channel.")
+                    f"Requested channels {targets[:8]}… not found in data.\n"
+                    f"Branch '{channel_branch}' contains: {discovered[:8]}…")
+
+            for ch_id in present:
+                mask = ch_arr == ch_id
+                vals = adc_arr[mask]
+                if len(vals) == 0:
+                    continue
+                self._fill_spectrum(
+                    ch_id, vals, n_bins,
+                    draw_expr=f'{adc_branch}[{channel_branch}=={ch_id}]')
+
+        # ── array mode: Draw("branch[N]") per channel ─────────────────── #
+        elif draw_mode == "array":
             targets = self._resolve_channel_ids(
                 channel_ids, ch_first, ch_last, ch_step, None)
+            if not targets:
+                raise ValueError(
+                    "Array mode requires a channel range.\n"
+                    "Set First and Last channel in the load dialog.")
 
             for ch_id in targets:
-                expr  = adc_branch.replace("%d", str(ch_id)) \
-                        if "%d" in adc_branch \
-                        else f"{adc_branch}[{ch_id}]"
-                limit = entry_limit if entry_limit > 0 else \
-                        int(tree.GetEntries())
-                tree.SetEstimate(limit + 1)
-                n = tree.Draw(expr, "", "goff", limit)
-                if n <= 0:
+                expr = (adc_branch.replace("%d", str(ch_id))
+                        if "%d" in adc_branch
+                        else f"{adc_branch}[{ch_id}]")
+                vals = self._pyroot_draw_chunked(
+                    tree, expr, "", entry_limit)
+                if vals is None or len(vals) == 0:
                     continue
-                vals = np.array([tree.GetV1()[i] for i in range(n)])
                 self._fill_spectrum(ch_id, vals, n_bins,
                                      draw_expr=f'Draw("{expr}")')
 
-        # ── custom mode: user expression with %d ────────────────────── #
+        # ── custom mode ───────────────────────────────────────────────── #
         elif draw_mode == "custom":
             if not custom_expr.strip():
                 raise ValueError(
-                    "Custom draw mode requires an expression. "
-                    'Example: "energy[%d]" or "sqrt(adc),channelID==%d"')
-            if ch_last < 0 and not channel_ids:
-                raise ValueError(
-                    "Custom mode requires a channel range. "
-                    "Set First/Last channel.")
+                    "Custom draw mode requires an expression.\n"
+                    'e.g. "energy[%d]"  or  "sqrt(adc),channelID==%d"')
             targets = self._resolve_channel_ids(
                 channel_ids, ch_first, ch_last, ch_step, None)
+            if not targets:
+                raise ValueError(
+                    "Custom mode requires a channel range.\n"
+                    "Set First and Last channel in the load dialog.")
 
-            # Parse: expr may be "draw_var,selection" or just "draw_var"
-            # %d in either part is replaced by ch_id
             for ch_id in targets:
                 filled = custom_expr.replace("%d", str(ch_id))
                 parts  = [p.strip() for p in filled.split(",", 1)]
                 var    = parts[0]
                 cut    = parts[1] if len(parts) > 1 else ""
-                limit  = entry_limit if entry_limit > 0 else \
-                         int(tree.GetEntries())
-                tree.SetEstimate(limit + 1)
-                n = tree.Draw(var, cut, "goff", limit)
-                if n <= 0:
+                vals   = self._pyroot_draw_chunked(
+                    tree, var, cut, entry_limit)
+                if vals is None or len(vals) == 0:
                     continue
-                vals = np.array([tree.GetV1()[i] for i in range(n)])
                 self._fill_spectrum(ch_id, vals, n_bins,
                                      draw_expr=f'Draw("{var}","{cut}")')
         else:
-            raise ValueError(f"Unknown draw mode: {draw_mode}")
+            raise ValueError(f"Unknown draw mode: '{draw_mode}'")
+
+    # ------------------------------------------------------------------ #
+    # PyROOT helpers
+    # ------------------------------------------------------------------ #
+
+    def _pyroot_read_two_branches(self, tree,
+                                   branch_ch:  str,
+                                   branch_adc: str,
+                                   entry_limit: int,
+                                   ) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Read two scalar branches in a single chunked pass.
+        Draw("adc:channel") → GetV1()=adc, GetV2()=channel.
+        Returns (ch_int32, adc_float64).
+        """
+        n_total    = int(tree.GetEntries())
+        n_read     = min(entry_limit, n_total)
+        chunk_size = min(_PYROOT_CHUNK, n_read)
+
+        ch_parts  = []
+        adc_parts = []
+        offset    = 0
+
+        while offset < n_read:
+            this_chunk = min(chunk_size, n_read - offset)
+            tree.SetEstimate(this_chunk + 1)
+            n = tree.Draw(f"{branch_adc}:{branch_ch}",
+                          "", "goff", this_chunk, offset)
+            if n > 0:
+                adc_parts.append(
+                    np.frombuffer(tree.GetV1(), dtype=np.float64,
+                                  count=n).copy())
+                ch_parts.append(
+                    np.frombuffer(tree.GetV2(), dtype=np.float64,
+                                  count=n).copy())
+            offset += this_chunk
+
+        if not ch_parts:
+            return np.array([], dtype=np.int32), np.array([], dtype=np.float64)
+
+        return (np.concatenate(ch_parts).astype(np.int32),
+                np.concatenate(adc_parts))
+
+    def _pyroot_draw_chunked(self, tree, var: str, cut: str,
+                              entry_limit: int) -> Optional[np.ndarray]:
+        """Single-expression chunked Draw → numpy array."""
+        n_total    = int(tree.GetEntries())
+        n_read     = min(entry_limit, n_total)
+        chunk_size = min(_PYROOT_CHUNK, n_read)
+        parts      = []
+        offset     = 0
+
+        while offset < n_read:
+            this_chunk = min(chunk_size, n_read - offset)
+            tree.SetEstimate(this_chunk + 1)
+            n = tree.Draw(var, cut, "goff", this_chunk, offset)
+            if n > 0:
+                parts.append(
+                    np.frombuffer(tree.GetV1(), dtype=np.float64,
+                                  count=n).copy())
+            offset += this_chunk
+
+        return np.concatenate(parts) if parts else None
+
+    # ------------------------------------------------------------------ #
+    # Spectrum fill
+    # ------------------------------------------------------------------ #
 
     def _fill_spectrum(self, ch_id: int, vals: np.ndarray,
                         n_bins: int, draw_expr: str = ""):
@@ -409,17 +480,17 @@ class ROOTFileLoader:
                                       range=(adc_min, adc_max))
         centers = 0.5 * (edges[:-1] + edges[1:])
         self.spectra[ch_id] = ChannelSpectrum(
-            channel_id=ch_id,
-            name=f"ch_{ch_id:04d}",
-            bin_centers=centers,
-            counts=counts,
-            n_entries=len(vals),
-            source="ttree",
-            draw_expr=draw_expr
+            channel_id  = ch_id,
+            name        = f"ch_{ch_id:04d}",
+            bin_centers = centers,
+            counts      = counts,
+            n_entries   = len(vals),
+            source      = "ttree",
+            draw_expr   = draw_expr,
         )
 
     # ================================================================== #
-    # uproot backend
+    # uproot — file open
     # ================================================================== #
 
     def _open_uproot(self, filename: str) -> dict:
@@ -435,7 +506,7 @@ class ROOTFileLoader:
                     info["trees"].append({
                         "name":     clean,
                         "branches": list(obj.keys()),
-                        "entries":  int(obj.num_entries)
+                        "entries":  int(obj.num_entries),
                     })
                 except Exception:
                     pass
@@ -447,11 +518,15 @@ class ROOTFileLoader:
                         "nbins":   len(vals),
                         "xmin":    float(edges[0]),
                         "xmax":    float(edges[-1]),
-                        "entries": int(obj.member("fEntries"))
+                        "entries": int(obj.member("fEntries")),
                     })
                 except Exception:
                     pass
         return info
+
+    # ================================================================== #
+    # uproot — TH1
+    # ================================================================== #
 
     def _load_th1_uproot(self, hist_names: Optional[list]):
         import re
@@ -468,8 +543,7 @@ class ROOTFileLoader:
             try:
                 counts, edges = obj.to_numpy()
                 centers = 0.5 * (edges[:-1] + edges[1:])
-                import re as re2
-                m     = re2.search(r"(\d+)$", name)
+                m     = re.search(r"(\d+)$", name)
                 ch_id = int(m.group(1)) if m else idx
                 self.spectra[ch_id] = ChannelSpectrum(
                     channel_id=ch_id, name=name,
@@ -478,14 +552,14 @@ class ROOTFileLoader:
             except Exception:
                 continue
 
+    # ================================================================== #
+    # uproot — TTree
+    # ================================================================== #
+
     def _load_ttree_uproot(self, tree_name, channel_branch, adc_branch,
                             n_bins, draw_mode, custom_expr,
                             channel_ids, ch_first, ch_last, ch_step,
                             max_entries):
-        """
-        uproot backend: supports filter and array modes.
-        Custom mode with expressions falls back to filter mode with a warning.
-        """
         tree = None
         for name, obj in self._file.items():
             if name.split(";")[0] == tree_name:
@@ -494,11 +568,10 @@ class ROOTFileLoader:
         if tree is None:
             raise ValueError(f"TTree '{tree_name}' not found.")
 
+        # ── array mode ───────────────────────────────────────────────── #
         if draw_mode == "array":
-            # Array branch — read the 2D array and index per channel
             entry_kw = {"entry_stop": max_entries} if max_entries > 0 else {}
             arr = tree[adc_branch].array(library="np", **entry_kw)
-            # arr shape: (n_events, n_channels) or similar
             if arr.ndim == 1:
                 raise ValueError(
                     f"Branch '{adc_branch}' is not an array branch. "
@@ -513,27 +586,48 @@ class ROOTFileLoader:
                 self._fill_spectrum(ch_id, vals, n_bins,
                                      draw_expr=f"{adc_branch}[{ch_id}]")
 
+        # ── filter mode (+ custom fallback) ──────────────────────────── #
         else:
-            # filter mode (and fallback for custom)
             if draw_mode == "custom":
                 import warnings
                 warnings.warn(
                     "uproot backend: custom expressions not supported. "
                     "Falling back to filter mode.", RuntimeWarning)
 
-            entry_kw = {"entry_stop": max_entries} if max_entries > 0 else {}
-            arrays  = tree.arrays(
-                [channel_branch, adc_branch], library="np", **entry_kw)
-            ch_arr  = arrays[channel_branch].astype(int)
-            adc_arr = arrays[adc_branch].astype(float)
+            entry_kw  = {"entry_stop": max_entries} if max_entries > 0 else {}
+            ch_parts  = []
+            adc_parts = []
+            for batch in tree.iterate(
+                    [channel_branch, adc_branch],
+                    library="np",
+                    step_size="50MB",
+                    **entry_kw):
+                ch_parts.append(batch[channel_branch].astype(np.int32))
+                adc_parts.append(batch[adc_branch].astype(np.float64))
+
+            if not ch_parts:
+                raise ValueError(
+                    f"No data from '{channel_branch}' / '{adc_branch}'.")
+
+            ch_arr  = np.concatenate(ch_parts)
+            adc_arr = np.concatenate(adc_parts)
 
             discovered = sorted(set(ch_arr.tolist()))
             targets    = self._resolve_channel_ids(
                 channel_ids, ch_first, ch_last, ch_step, discovered)
 
+            if not targets:
+                raise ValueError(
+                    "No target channels could be determined.\n"
+                    "Set First/Last channel or leave both at default "
+                    "to auto-discover.")
+
             for ch_id in targets:
                 mask = ch_arr == ch_id
                 vals = adc_arr[mask]
+                if len(vals) == 0:
+                    continue
                 self._fill_spectrum(
                     ch_id, vals, n_bins,
-                    draw_expr=f'Draw("{adc_branch}","{channel_branch}=={ch_id}")')
+                    draw_expr=(f'Draw("{adc_branch}",'
+                               f'"{channel_branch}=={ch_id}")'))
