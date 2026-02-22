@@ -616,6 +616,29 @@ class AssignEnergyDialog(QDialog):
 # Main Window
 # ======================================================================== #
 
+
+class _LoadingProgressDialog(QDialog):
+    """Non-blocking progress dialog shown while loading TTree channels."""
+
+    def __init__(self, title: str, n_channels: int, parent=None):
+        super().__init__(parent,
+            Qt.WindowTitleHint | Qt.CustomizeWindowHint)
+        self.setWindowTitle(title)
+        self.setFixedWidth(380)
+        layout = QVBoxLayout(self)
+        self.lbl = QLabel(f"Loading 0 / {n_channels} channels…")
+        layout.addWidget(self.lbl)
+        self.bar = QProgressBar()
+        self.bar.setRange(0, n_channels)
+        self.bar.setValue(0)
+        layout.addWidget(self.bar)
+
+    def update(self, done: int, total: int):
+        self.lbl.setText(f"Loading {done} / {total} channels…")
+        self.bar.setValue(done)
+        QApplication.processEvents()
+
+
 class MainWindow(QMainWindow):
 
     def __init__(self):
@@ -705,10 +728,10 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.le_custom_expr)
 
 
-        self.btn_fit_all = QPushButton("⚡ Fit All Channels")
-        self.btn_fit_all.setEnabled(False)
-        self.btn_fit_all.clicked.connect(self._fit_all)
-        layout.addWidget(self.btn_fit_all)
+        #self.btn_fit_all = QPushButton("⚡ Fit All Channels")
+        #self.btn_fit_all.setEnabled(False)
+        #self.btn_fit_all.clicked.connect(self._fit_all)
+        #layout.addWidget(self.btn_fit_all)
 
         self.btn_export = QPushButton("Export")
         self.btn_export.setEnabled(False)
@@ -721,19 +744,19 @@ class MainWindow(QMainWindow):
         panel = QWidget()
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(8)
+        layout.setSpacing(10)
 
         # ── Channel navigation ─────────────────────────────────────── #
         nav_box = QGroupBox("Channel")
         nav_l   = QVBoxLayout(nav_box)
         nav_h   = QHBoxLayout()
         self.btn_prev = QPushButton("◀")
-        self.btn_prev.setFixedWidth(36)
+        self.btn_prev.setFixedWidth(100)
         self.btn_prev.clicked.connect(self._prev_channel)
         self.cb_channel = QComboBox()
         self.cb_channel.currentIndexChanged.connect(self._on_channel_changed)
         self.btn_next = QPushButton("▶")
-        self.btn_next.setFixedWidth(36)
+        self.btn_next.setFixedWidth(100)
         self.btn_next.clicked.connect(self._next_channel)
         nav_h.addWidget(self.btn_prev)
         nav_h.addWidget(self.cb_channel, stretch=1)
@@ -792,6 +815,45 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(det_box)
 
+        # ── Detected peaks table (assign energies) ─────────────────── #
+        assign_box = QGroupBox("Assign Energies to Detected Peaks")
+        assign_l   = QVBoxLayout(assign_box)
+
+        self.tbl_detected = QTableWidget(0, 3)
+        self.tbl_detected.setHorizontalHeaderLabels(
+            ["ADC", "Energy", "Label"])
+        self.tbl_detected.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Stretch)
+        self.tbl_detected.setMinimumHeight(200)
+        self.tbl_detected.setMaximumHeight(300)
+        self.tbl_detected.itemDoubleClicked.connect(
+            self._on_detected_table_dclick)
+        assign_l.addWidget(self.tbl_detected)
+
+        ab = QHBoxLayout()
+        ab.setSpacing(3)  # tighten gap between buttons
+
+        self.btn_assign = QPushButton("✏ Assign")
+        self.btn_assign.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.btn_assign.clicked.connect(self._assign_selected_peak)
+
+        self.btn_add_manual = QPushButton("+ Manual")
+        self.btn_add_manual.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.btn_add_manual.clicked.connect(lambda: self._open_assign_dialog(0.0))
+
+        self.btn_click_pk = QPushButton("🖱 Click")
+        self.btn_click_pk.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.btn_click_pk.setCheckable(True)
+        self.btn_click_pk.toggled.connect(self._toggle_click_mode)
+
+        ab.addWidget(self.btn_assign)
+        ab.addWidget(self.btn_add_manual)
+        ab.addWidget(self.btn_click_pk)
+        assign_l.addLayout(ab)
+
+        layout.addWidget(assign_box)
+
+
         # ── Propagate peaks to other channels ─────────────────────── #
         prop_box = QGroupBox("Propagate Peaks to All Channels")
         prop_l   = QVBoxLayout(prop_box)
@@ -843,36 +905,7 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(prop_box)
 
-        # ── Detected peaks table (assign energies) ─────────────────── #
-        assign_box = QGroupBox("Assign Energies to Detected Peaks")
-        assign_l   = QVBoxLayout(assign_box)
-
-        self.tbl_detected = QTableWidget(0, 3)
-        self.tbl_detected.setHorizontalHeaderLabels(
-            ["ADC", "Energy", "Label"])
-        self.tbl_detected.horizontalHeader().setSectionResizeMode(
-            QHeaderView.Stretch)
-        self.tbl_detected.setMinimumHeight(200)
-        self.tbl_detected.setMaximumHeight(300)
-        self.tbl_detected.itemDoubleClicked.connect(
-            self._on_detected_table_dclick)
-        assign_l.addWidget(self.tbl_detected)
-
-        ab = QHBoxLayout()
-        self.btn_assign   = QPushButton("✏ Assign")
-        self.btn_assign.clicked.connect(self._assign_selected_peak)
-        self.btn_add_manual = QPushButton("+ Manual")
-        self.btn_add_manual.clicked.connect(
-            lambda: self._open_assign_dialog(0.0))
-        self.btn_click_pk = QPushButton("🖱 Click")
-        self.btn_click_pk.setCheckable(True)
-        self.btn_click_pk.toggled.connect(self._toggle_click_mode)
-        ab.addWidget(self.btn_assign)
-        ab.addWidget(self.btn_add_manual)
-        ab.addWidget(self.btn_click_pk)
-        assign_l.addLayout(ab)
-
-        layout.addWidget(assign_box)
+        
 
         # ── Assigned calibration points ────────────────────────────── #
         cal_box = QGroupBox("Calibration Points (Current channel)")
@@ -909,6 +942,11 @@ class MainWindow(QMainWindow):
         self.btn_fit_one.clicked.connect(self._fit_current)
         layout.addWidget(self.btn_fit_one)
 
+        self.btn_fit_all = QPushButton("⚡  Fit All Channels")
+        self.btn_fit_all.setEnabled(False)
+        self.btn_fit_all.clicked.connect(self._fit_all)
+        layout.addWidget(self.btn_fit_all)
+
         layout.addStretch()
 
         self.lbl_bad = QLabel("")
@@ -939,7 +977,7 @@ class MainWindow(QMainWindow):
         tab    = QWidget()
         layout = QVBoxLayout(tab)
         layout.setContentsMargins(4, 4, 4, 4)
-        info = QLabel("Click any thumbnail to open that channel. "
+        info = QLabel("To load all channels, find peaks in one channel.\nClick any thumbnail to open that channel. "
                        "Green = good fit | Red = bad channel.")
         info.setStyleSheet("color: #555; font-size: 11px;")
         layout.addWidget(info)
@@ -1485,6 +1523,10 @@ class MainWindow(QMainWindow):
                 margin-top: 8px; padding-top: 4px;
                 font-weight: bold; color: #1565c0;
                 background-color: #ffffff;
+            }
+            QGroupBox QPushButton {
+                padding: 4px 4px;
+                min-width: 0px;
             }
             QGroupBox::title { subcontrol-origin: margin; left: 8px; }
             QComboBox, QSpinBox, QDoubleSpinBox, QLineEdit {

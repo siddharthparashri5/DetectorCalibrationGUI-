@@ -204,6 +204,10 @@ class ResolutionTab(QWidget):
         splitter.setSizes([600, 420])
         splitter.addWidget(right)
 
+        self.btn_save_trend = QPushButton("💾 Save Plot")
+        self.btn_save_trend.clicked.connect(self._save_trend_plot)
+        trend_ctrl.addWidget(self.btn_save_trend)
+
     # ------------------------------------------------------------------ #
     # Spectrum plotting + SpanSelector
     # ------------------------------------------------------------------ #
@@ -520,3 +524,15 @@ class ResolutionTab(QWidget):
                 f"Resolution results saved to:\n{path}")
         except Exception as e:
             QMessageBox.critical(self, "Export Error", str(e))
+
+    def _save_trend_plot(self):
+        path, selected_filter = QFileDialog.getSaveFileName(
+            self, "Save Trend Plot", "resolution_trend.png",
+            "PNG (*.png);;PDF (*.pdf);;SVG (*.svg)")
+        if not path:
+            return
+        try:
+            self.fig_trend.savefig(path, dpi=150, bbox_inches="tight")
+            QMessageBox.information(self, "Saved", f"Plot saved to:\n{path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Save Error", str(e))
