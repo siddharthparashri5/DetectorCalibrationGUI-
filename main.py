@@ -15,10 +15,6 @@ from src.main_window import MainWindow
 
 
 def check_backend():
-    """
-    Try to detect a ROOT backend before launching the GUI.
-    If neither PyROOT nor uproot is found, show a clear error dialog.
-    """
     try:
         from src.root_loader import _detect_backend, _find_root_python_path
         backend = _detect_backend()
@@ -53,7 +49,6 @@ def main():
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
 
-    # macOS rendering fix
     if sys.platform == "darwin":
         os.environ.setdefault("QT_MAC_WANTS_LAYER", "1")
 

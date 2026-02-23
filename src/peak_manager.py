@@ -22,8 +22,8 @@ from scipy.ndimage import gaussian_filter1d
 
 @dataclass
 class Peak:
-    adc_position:  float        # x-axis position in ADC units
-    known_energy:  float        # physical energy in keV
+    adc_position:  float
+    known_energy:  float
     label:         str  = ""
     auto_detected: bool = False
 
@@ -31,12 +31,12 @@ class Peak:
 class PeakManager:
     """
     Stores peak assignments.
-    global_peaks  : list[Peak]           — applied to all channels by default
-    channel_peaks : dict[int, list[Peak]]— per-channel overrides
+    global_peaks  : list[Peak]            — applied to all channels by default
+    channel_peaks : dict[int, list[Peak]] — per-channel overrides
     """
 
     def __init__(self):
-        self.global_peaks:  list[Peak]          = []
+        self.global_peaks:  list[Peak]            = []
         self.channel_peaks: dict[int, list[Peak]] = {}
 
     # ------------------------------------------------------------------ #
@@ -113,28 +113,36 @@ class PeakManager:
                                 counts: np.ndarray,
                                 sigma: float = 2.0,
                                 threshold: float = 0.05,
-                                max_peaks: int = 10
+                                max_peaks: int = 10,
+                                pedestal_cut: float = 0.0
                                 ) -> list[float]:
         """
         Detect peaks using ROOT TSpectrum.
-        sigma     : smoothing width in bins
-        threshold : minimum peak height as fraction of max (0–1)
-        Returns list of ADC positions.
+        pedestal_cut : ignore all ADC bins below this value (excludes pedestal).
+                       Slices the arrays rather than zeroing, so TSpectrum's
+                       relative threshold is computed only over physics peaks.
         """
         try:
             import ROOT
             import array as arr
 
+            # Apply pedestal cut by slicing arrays
+            if pedestal_cut > 0:
+                mask = bin_centers >= pedestal_cut
+                bin_centers = bin_centers[mask]
+                counts      = counts[mask]
+
+            if len(counts) == 0:
+                return []
+
             n = len(counts)
-            # TSpectrum needs a Float_t array
-            src = arr.array("f", counts.astype(float).tolist())
-            h   = ROOT.TH1F("_tspec_tmp", "", n,
-                             float(bin_centers[0]),
-                             float(bin_centers[-1]))
+            h = ROOT.TH1F("_tspec_tmp", "", n,
+                           float(bin_centers[0]),
+                           float(bin_centers[-1]))
             for i, c in enumerate(counts):
                 h.SetBinContent(i + 1, float(c))
 
-            sp = ROOT.TSpectrum(max_peaks)
+            sp      = ROOT.TSpectrum(max_peaks)
             n_found = sp.Search(h, sigma, "nobackground nodraw", threshold)
 
             positions = []
@@ -145,10 +153,10 @@ class PeakManager:
             ROOT.gDirectory.Delete("_tspec_tmp")
             return sorted(positions)
 
-        except Exception as e:
-            # Fall back to scipy if TSpectrum fails
+        except Exception:
             return PeakManager.detect_peaks_scipy(
-                bin_centers, counts, sigma, threshold, max_peaks)
+                bin_centers, counts, sigma, threshold, max_peaks,
+                pedestal_cut=0.0)  # already sliced above
 
     # ------------------------------------------------------------------ #
     # Peak detection — scipy fallback
@@ -159,15 +167,22 @@ class PeakManager:
                             counts: np.ndarray,
                             sigma: float = 2.0,
                             threshold: float = 0.05,
-                            max_peaks: int = 10
+                            max_peaks: int = 10,
+                            pedestal_cut: float = 0.0
                             ) -> list[float]:
         """
         Detect peaks using scipy.signal.find_peaks.
-        Used when TSpectrum is unavailable (uproot backend).
+        pedestal_cut : ignore ADC bins below this value.
         """
         from scipy.signal import find_peaks as sp_find_peaks
 
-        if counts.sum() == 0:
+        # Apply pedestal cut by slicing
+        if pedestal_cut > 0:
+            mask        = bin_centers >= pedestal_cut
+            bin_centers = bin_centers[mask]
+            counts      = counts[mask]
+
+        if len(counts) == 0 or counts.sum() == 0:
             return []
 
         smoothed       = gaussian_filter1d(counts.astype(float), sigma=sigma)
@@ -180,11 +195,9 @@ class PeakManager:
         if len(indices) == 0:
             return []
 
-        # Sort by prominence, keep top max_peaks
         order = np.argsort(props["prominences"])[::-1]
         top   = indices[order[:max_peaks]]
 
-        # Centroid refinement
         positions = []
         window = max(3, int(len(counts) * 0.01))
         for idx in top:
@@ -203,39 +216,58 @@ class PeakManager:
     # ------------------------------------------------------------------ #
 
     @staticmethod
+    def detect_peaks(bin_centers: np.ndarray,
+                      counts: np.ndarray,
+                      sigma: float = 2.0,
+                      threshold: float = 0.05,
+                      max_peaks: int = 10,
+                      backend: str = "pyroot",
+                      pedestal_cut: float = 0.0
+                      ) -> list[float]:
+        """Dispatch to TSpectrum or scipy depending on active backend."""
+        if backend == "pyroot":
+            return PeakManager.detect_peaks_tspectrum(
+                bin_centers, counts, sigma, threshold, max_peaks,
+                pedestal_cut=pedestal_cut)
+        else:
+            return PeakManager.detect_peaks_scipy(
+                bin_centers, counts, sigma, threshold, max_peaks,
+                pedestal_cut=pedestal_cut)
+
+    # ------------------------------------------------------------------ #
+    # find_peaks_in_windows — used by propagate
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
     def find_peaks_in_windows(bin_centers: np.ndarray,
                                counts:      np.ndarray,
                                reference_peaks: list,
                                window:      float,
                                sigma:       float = 2.0,
                                threshold:   float = 0.05,
-                               backend:     str   = "pyroot"
+                               backend:     str   = "pyroot",
+                               pedestal_cut: float = 0.0
                                ) -> list:
         """
         For each reference peak, search inside [ref_adc - window, ref_adc + window]
-        for the brightest local maximum in this channel's spectrum.
+        for the best matching local maximum in this channel's spectrum.
 
-        Strategy (in order of preference):
-          1. Run TSpectrum / scipy inside the narrow window and take the
-             peak closest to the reference position (within the window).
-          2. If no peak found by detector, fall back to centroid of the
-             region around the local maximum inside the window.
-
-        Returns a list[Peak] with same known_energy as the reference peaks
-        but ADC positions refined to this channel.
+        Returns a list[Peak] with same known_energy as reference peaks but
+        ADC positions refined to this channel. Every reference peak gets a
+        result — falls back to centroid or reference position if no peak found.
         """
         result = []
         smooth = gaussian_filter1d(counts.astype(float), sigma=max(1, sigma))
 
         for ref_peak in reference_peaks:
-            ref_adc   = ref_peak.adc_position
-            lo        = ref_adc - window
-            hi        = ref_adc + window
+            ref_adc = ref_peak.adc_position
+            lo      = ref_adc - window
+            hi      = ref_adc + window
 
             # Slice spectrum to window
             mask = (bin_centers >= lo) & (bin_centers <= hi)
             if mask.sum() < 3:
-                # Window too narrow or outside spectrum — keep reference pos
+                # Window too narrow / outside spectrum — keep reference position
                 result.append(Peak(
                     adc_position  = ref_adc,
                     known_energy  = ref_peak.known_energy,
@@ -245,34 +277,36 @@ class PeakManager:
 
             win_centers = bin_centers[mask]
             win_counts  = smooth[mask]
+            raw_counts  = counts[mask]
 
             # Try peak detection inside the window
             found_pos = None
             try:
                 if backend == "pyroot":
                     candidates = PeakManager.detect_peaks_tspectrum(
-                        win_centers, counts[mask],
-                        sigma=sigma, threshold=0.01, max_peaks=5)
+                        win_centers, raw_counts,
+                        sigma=sigma, threshold=0.01, max_peaks=5,
+                        pedestal_cut=0.0)
                 else:
                     candidates = PeakManager.detect_peaks_scipy(
-                        win_centers, counts[mask],
-                        sigma=sigma, threshold=0.01, max_peaks=5)
+                        win_centers, raw_counts,
+                        sigma=sigma, threshold=0.01, max_peaks=5,
+                        pedestal_cut=0.0)
 
                 if candidates:
                     # Take candidate closest to reference position
-                    found_pos = min(candidates,
-                                    key=lambda x: abs(x - ref_adc))
+                    found_pos = min(candidates, key=lambda x: abs(x - ref_adc))
             except Exception:
                 pass
 
             if found_pos is None:
-                # Fallback: centroid around the local maximum in window
-                idx_max   = int(np.argmax(win_counts))
-                half_w    = max(2, int(len(win_counts) * 0.1))
-                lo_i      = max(0, idx_max - half_w)
-                hi_i      = min(len(win_counts), idx_max + half_w + 1)
-                w_slice   = win_counts[lo_i:hi_i]
-                c_slice   = win_centers[lo_i:hi_i]
+                # Fallback: centroid around local maximum in window
+                idx_max = int(np.argmax(win_counts))
+                half_w  = max(2, int(len(win_counts) * 0.1))
+                lo_i    = max(0, idx_max - half_w)
+                hi_i    = min(len(win_counts), idx_max + half_w + 1)
+                w_slice = win_counts[lo_i:hi_i]
+                c_slice = win_centers[lo_i:hi_i]
                 if w_slice.sum() > 0:
                     found_pos = float(np.sum(c_slice * w_slice) / w_slice.sum())
                 else:
@@ -285,21 +319,3 @@ class PeakManager:
                 auto_detected = True))
 
         return result
-
-    @staticmethod
-    def detect_peaks(bin_centers: np.ndarray,
-                      counts: np.ndarray,
-                      sigma: float = 2.0,
-                      threshold: float = 0.05,
-                      max_peaks: int = 10,
-                      backend: str = "pyroot"
-                      ) -> list[float]:
-        """
-        Dispatch to TSpectrum or scipy depending on active backend.
-        """
-        if backend == "pyroot":
-            return PeakManager.detect_peaks_tspectrum(
-                bin_centers, counts, sigma, threshold, max_peaks)
-        else:
-            return PeakManager.detect_peaks_scipy(
-                bin_centers, counts, sigma, threshold, max_peaks)

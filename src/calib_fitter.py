@@ -3,9 +3,10 @@ CalibrationFitter
 =================
 Supported models:
 
-  linear   (default):  E = P0 + P1·Q
-  nonlinear:           E = P0·(P1^Q)^P2 + P3·Q − P0
-  custom:              user-defined expression, e.g.  a*x**2 + b*x + c
+  linear       (default):  E = P0 + P1·Q
+  nonlinear:               E = P0·(P1^Q)^P2 + P3·Q − P0
+  nonlinear_3pt:           E = P0·P1^Q + P3·Q − P0  (P2=1, for 3-point fits)
+  custom:                  user-defined expression, e.g.  a*x**2 + b*x + c
 
 Where Q = raw ADC value.
 
@@ -29,10 +30,21 @@ from scipy.optimize import curve_fit
 def model_linear(Q, P0, P1):
     return P0 + P1 * Q
 
+
 def model_nonlinear(Q, P0, P1, P2, P3):
-    base     = np.clip(np.abs(P1), 1e-10, None)
-    exp_term = np.power(base, Q) ** P2
-    return P0 * exp_term + P3 * Q - P0
+    Q    = np.asarray(Q, dtype=float)
+    S    = np.power(np.abs(Q), np.clip(P2, 0.1, 10.0))
+    base = np.clip(np.abs(P1), 1e-10, 2.0)
+    return P0 * np.power(base, S) + P3 * Q - P0
+
+
+def model_nonlinear_3pt(Q, P0, P1, P3):
+    """Constrained nonlinear with P2=1: E = P0*P1^Q + P3*Q - P0
+    Used when only 3 calibration points are available."""
+    Q    = np.asarray(Q, dtype=float)
+    base = np.clip(np.abs(P1), 1e-10, 2.0)
+    return P0 * np.power(base, Q) + P3 * Q - P0
+
 
 MODELS = {
     "linear": {
@@ -48,8 +60,18 @@ MODELS = {
         "n_params":    4,
         "label":       "E = P0·(P1^Q)^P2 + P3·Q − P0",
         "bounds": (
-            [-np.inf, 0.0,   -np.inf, 0.0   ],
-            [ np.inf, 2.0,    np.inf, np.inf ]
+            [-np.inf, 0.0,  0.1,   0.0   ],
+            [ np.inf, 2.0,  10.0,  np.inf]
+        ),
+    },
+    "nonlinear_3pt": {
+        "func":        model_nonlinear_3pt,
+        "param_names": ["P0", "P1", "P3"],
+        "n_params":    3,
+        "label":       "E = P0·P1^Q + P3·Q − P0  (P2=1, 3-point)",
+        "bounds": (
+            [-np.inf, 0.0,   0.0   ],
+            [ np.inf, 2.0,   np.inf]
         ),
     },
 }
@@ -74,16 +96,20 @@ class FitResult:
     success:       bool
     bad_channel:   bool = False
     bad_reason:    str  = ""
-    note:          str  = ""        # non-fatal notes (e.g. exact interpolation)
+    note:          str  = ""
 
     def energy_at(self, Q):
+        """Evaluate the calibration model at ADC value(s) Q."""
+        Q = np.asarray(Q, dtype=float)
         if self.model == "linear":
             return model_linear(Q, *self.params)
         elif self.model == "nonlinear":
             return model_nonlinear(Q, *self.params)
+        elif self.model == "nonlinear_3pt":
+            return model_nonlinear_3pt(Q, *self.params)
         elif self.model == "custom" and hasattr(self, "_custom_func"):
             return self._custom_func(Q, *self.params)
-        return np.full_like(np.asarray(Q, float), np.nan)
+        return np.full_like(Q, np.nan)
 
     def __str__(self):
         lines = [f"Channel {self.channel_id} | {self.model_label}"]
@@ -103,7 +129,7 @@ class FitResult:
 class CalibrationFitter:
 
     CHI2_NDF_THRESHOLD = 10.0
-    UNC_FRAC_THRESHOLD = 5.0     # uncertainty > 500% of |param| → bad
+    UNC_FRAC_THRESHOLD = 5.0
 
     def __init__(self):
         self.results: dict[int, FitResult] = {}
@@ -121,6 +147,12 @@ class CalibrationFitter:
         adc_points    = np.asarray(adc_points,    dtype=float)
         energy_points = np.asarray(energy_points, dtype=float)
         n_pts         = len(adc_points)
+
+        # Auto-downgrade nonlinear to 3-point variant when only 3 points
+        auto_downgraded = False
+        if model == "nonlinear" and n_pts == 3:
+            model           = "nonlinear_3pt"
+            auto_downgraded = True
 
         # ── resolve model ────────────────────────────────────────────── #
         if model in MODELS:
@@ -171,21 +203,23 @@ class CalibrationFitter:
         fitted    = func(adc_points, *popt)
         residuals = energy_points - fitted
         chi2      = float(np.sum(residuals ** 2))
-        ndf       = n_pts - n_params   # can be 0
+        ndf       = n_pts - n_params
 
-        # chi2/NDF only meaningful when NDF > 0
         chi2_ndf = chi2 / ndf if ndf > 0 else float("nan")
 
-        # ── notes only — no bad flagging for successful fits ────────── #
         bad, reason, note = False, "", ""
 
         if ndf == 0:
             note = (f"Exact interpolation ({n_pts} pts = {n_params} params). "
                     "Add more peaks for a χ²/NDF estimate.")
         elif np.any(np.isnan(perr)):
-            # NaN covariance is a genuine fit failure
             bad    = True
             reason = "Covariance matrix has NaN (fit unstable — try a different model or more peaks)"
+
+        if auto_downgraded:
+            downgrade_note = ("Auto-selected 3-point nonlinear (P2=1) — "
+                              "add a 4th peak for full nonlinear fit.")
+            note = (note + "  " + downgrade_note).strip()
 
         # ── build result ─────────────────────────────────────────────── #
         result = FitResult(
@@ -197,7 +231,6 @@ class CalibrationFitter:
             success=True, bad_channel=bad, bad_reason=reason, note=note
         )
 
-        # Attach custom function for energy_at()
         if model == "custom" and custom_f is not None:
             result._custom_func = custom_f
 
@@ -242,20 +275,15 @@ class CalibrationFitter:
             return [inter, max(slope, 1e-6)]
         elif model == "nonlinear":
             return [10.0, 0.999, 1.0, max(slope, 1e-6)]
+        elif model == "nonlinear_3pt":
+            return [10.0, 0.999, max(slope, 1e-6)]
         else:
-            # custom — generic guess of 1s with slope hint for last param
-            p0    = [1.0] * n_params
+            p0     = [1.0] * n_params
             p0[-1] = slope
             return p0
 
     @staticmethod
     def _parse_custom(expr: str):
-        """
-        Parse user expression like  'a*x**2 + b*x + c'
-        Returns (callable, param_names, callable_ref).
-        Parameter names: any single letter except x (case-sensitive).
-        x is the ADC value.
-        """
         import re
         names = sorted(set(re.findall(r'\b([a-wyzA-WYZ])\b', expr)))
         if not names:

@@ -104,8 +104,7 @@ class SpectrumCanvas(FigureCanvas):
         self.fig.tight_layout(pad=1.5)
         self.draw()
 
-    def draw_detected_peaks(self, positions: list[float]):
-        """Draw auto-detected peak positions (before energy assignment)."""
+    def draw_detected_peaks(self, positions: list):
         for line in self._peak_markers:
             try: line.remove()
             except Exception: pass
@@ -120,8 +119,7 @@ class SpectrumCanvas(FigureCanvas):
             self._peak_markers.append(line)
         self.draw()
 
-    def draw_assigned_peaks(self, peaks: list[Peak]):
-        """Draw peaks that have known energy assigned (green)."""
+    def draw_assigned_peaks(self, peaks: list):
         ymax = self.ax.get_ylim()[1]
         for p in peaks:
             line = self.ax.axvline(p.adc_position, color="#2E7D32",
@@ -158,13 +156,23 @@ class CalibCurveCanvas(FigureCanvas):
         x_fit = np.linspace(max(0, adc.min() * 0.8), adc.max() * 1.15, 500)
         y_fit = result.energy_at(x_fit)
 
+        # Check that energy_at returned valid values
+        if np.all(np.isnan(y_fit)):
+            self.ax.text(0.5, 0.5,
+                          f"Cannot plot model '{result.model}'",
+                          ha="center", va="center",
+                          transform=self.ax.transAxes,
+                          color="#c62828", fontsize=10)
+            self.fig.tight_layout(pad=1.2)
+            self.draw()
+            return
+
         self.ax.plot(x_fit, y_fit, "-", color="#1565c0",
                       linewidth=1.8, label="Calibration fit")
         self.ax.scatter(adc, eng, color="#c62828", zorder=5,
                          s=60, label="Assigned peaks")
 
-        # Annotate each point with its energy label
-        for a, e, p in zip(adc, eng, result.adc_points):
+        for a, e in zip(adc, eng):
             self.ax.annotate(f"{e:.1f} keV",
                               xy=(a, e), xytext=(4, 4),
                               textcoords="offset points",
@@ -243,11 +251,15 @@ class OverviewGrid(QScrollArea):
         self.setWidget(self._widget)
         self.setWidgetResizable(True)
 
-    def populate(self, spectra: dict, results: dict | None = None):
+    def populate(self, spectra: dict, results: dict = None):
+        # Clear existing widgets
         for i in reversed(range(self._layout.count())):
             w = self._layout.itemAt(i).widget()
             if w:
                 w.setParent(None)
+
+        if not spectra:
+            return
 
         for i, ch_id in enumerate(sorted(spectra.keys())):
             sp  = spectra[ch_id]
@@ -295,23 +307,21 @@ class LoadDialog(QDialog):
         self.setWindowTitle("Configure Data Source")
         self.setMinimumWidth(560)
 
-        # Result fields
-        self.result_mode       = ""
-        self.result_tree       = ""
-        self.result_ch_branch  = ""
-        self.result_adc_branch = ""
-        self.result_nbins      = 1024
-        self.result_draw_mode  = "filter"
+        self.result_mode        = ""
+        self.result_tree        = ""
+        self.result_ch_branch   = ""
+        self.result_adc_branch  = ""
+        self.result_nbins       = 1024
+        self.result_draw_mode   = "filter"
         self.result_custom_expr = ""
-        self.result_ch_first   = 0
-        self.result_ch_last    = -1
-        self.result_ch_step    = 1
+        self.result_ch_first    = 0
+        self.result_ch_last     = -1
+        self.result_ch_step     = 1
         self.result_max_entries = 0
-        self.result_structure  = "filter"
+        self.result_ch_ids      = None
 
         layout = QVBoxLayout(self)
 
-        # Backend label
         backend = file_info.get("backend", "unknown").upper()
         blabel  = QLabel(f"Active backend: <b>{backend}</b>")
         blabel.setStyleSheet("color: #1565c0; padding: 4px;")
@@ -320,7 +330,6 @@ class LoadDialog(QDialog):
         has_trees = bool(file_info["trees"])
         has_hists = bool(file_info["histograms"])
 
-        # ── Mode (TTree or TH1) ──────────────────────────────────────── #
         mode_box    = QGroupBox("Data Mode")
         mode_layout = QVBoxLayout(mode_box)
         self.rb_tree = QCheckBox(f"TTree  ({len(file_info['trees'])} found)")
@@ -333,34 +342,30 @@ class LoadDialog(QDialog):
         mode_layout.addWidget(self.rb_hist)
         layout.addWidget(mode_box)
 
-        # ── TTree options ────────────────────────────────────────────── #
         self.tree_group = QGroupBox("TTree Options")
         tg = QFormLayout(self.tree_group)
 
         self.cb_tree_name = QComboBox()
         for t in file_info["trees"]:
             self.cb_tree_name.addItem(
-                f"{t['name']}  ( - Totoal {t['entries']} entries)", t["name"])
+                f"{t['name']}  ({t['entries']} entries)", t["name"])
 
-        # Draw mode
         self.cb_draw_mode = QComboBox()
         self.cb_draw_mode.addItem(
             'Filter     Draw("adc", "channelID==N")', "filter")
         self.cb_draw_mode.addItem(
             'Array      Draw("adc[channelID]")', "array")
         self.cb_draw_mode.addItem(
-            'Custom     user expression (ROOT mode)  (%d = channel number)', "custom")
+            'Custom     user expression (%d = channel number)', "custom")
 
         self.cb_channel_branch = QComboBox()
         self.cb_adc_branch     = QComboBox()
 
-        # Custom expression line
         self.le_draw_custom = QLineEdit()
         self.le_draw_custom.setPlaceholderText(
             'e.g.  energy[%d]   or   sqrt(adc),channelID==%d')
         self.le_draw_custom.setEnabled(False)
 
-        # Preview label — shows the exact Draw() call
         self.lbl_draw_preview = QLabel("")
         self.lbl_draw_preview.setStyleSheet(
             "color:#555; font-size:11px; font-style:italic;")
@@ -370,18 +375,17 @@ class LoadDialog(QDialog):
         self.sb_nbins.setRange(64, 65536)
         self.sb_nbins.setValue(1024)
 
-        tg.addRow("TTree:",           self.cb_tree_name)
-        tg.addRow("Draw mode:",       self.cb_draw_mode)
-        tg.addRow("Channel branch:",  self.cb_channel_branch)
+        tg.addRow("TTree:",             self.cb_tree_name)
+        tg.addRow("Draw mode:",         self.cb_draw_mode)
+        tg.addRow("Channel branch:",    self.cb_channel_branch)
         tg.addRow("Energy/ADC branch:", self.cb_adc_branch)
         tg.addRow("Custom expression:", self.le_draw_custom)
-        tg.addRow("Draw preview:",    self.lbl_draw_preview)
-        tg.addRow("Histogram bins:",  self.sb_nbins)
-
+        tg.addRow("Draw preview:",      self.lbl_draw_preview)
+        tg.addRow("Histogram bins:",    self.sb_nbins)
         layout.addWidget(self.tree_group)
 
-        # ── Channel range ────────────────────────────────────────────── #
-        self.ch_range_box = QGroupBox("Channel Range (Only in Custom Draw Mode)")
+        # Channel range — only shown for array/custom modes
+        self.ch_range_box = QGroupBox("Channel Range (Array / Custom modes only)")
         cr = QFormLayout(self.ch_range_box)
 
         range_h = QHBoxLayout()
@@ -403,31 +407,26 @@ class LoadDialog(QDialog):
         range_h.addWidget(self.sb_ch_step)
         cr.addRow("Range:", range_h)
 
-        # Custom channel list
         self.le_ch_list = QLineEdit()
         self.le_ch_list.setPlaceholderText(
-            "Optional: comma-separated list, e.g.  0,1,2,5,10  "
-            "(overrides First/Last/Step)")
+            "Optional: comma-separated list, e.g.  0,1,2,5,10")
         cr.addRow("Custom list:", self.le_ch_list)
 
-        # Max entries
         self.sb_max_entries = QSpinBox()
         self.sb_max_entries.setRange(0, 100_000_000)
         self.sb_max_entries.setValue(0)
-        self.sb_max_entries.setSpecialValueText("Choose entries")
+        self.sb_max_entries.setSpecialValueText("All entries")
         self.sb_max_entries.setSingleStep(10000)
-        cr.addRow("Max entries per channel:", self.sb_max_entries)
+        cr.addRow("Max entries:", self.sb_max_entries)
 
         layout.addWidget(self.ch_range_box)
 
-        # ── TH1 options ──────────────────────────────────────────────── #
         self.hist_group = QGroupBox("Histogram Options")
         QVBoxLayout(self.hist_group).addWidget(
             QLabel(f"{len(file_info['histograms'])} histogram(s) found — "
                    "all will be loaded."))
         layout.addWidget(self.hist_group)
 
-        # ── Connect signals ──────────────────────────────────────────── #
         self.cb_tree_name.currentIndexChanged.connect(
             lambda idx: self._fill_branches(file_info, idx))
         self.cb_draw_mode.currentIndexChanged.connect(self._on_draw_mode)
@@ -467,19 +466,8 @@ class LoadDialog(QDialog):
 
         self.cb_channel_branch.setEnabled(is_filt)
         self.le_draw_custom.setEnabled(is_cust)
-
         # Channel range only needed for array and custom modes
-        # filter mode auto-discovers channels from data
         self.ch_range_box.setVisible(is_arr or is_cust)
-
-        hint = ""
-        if is_arr:
-            hint = "Array mode: set channel First/Last range below."
-        elif is_cust:
-            hint = "Custom mode: use %d as placeholder for channel number."
-        elif is_filt:
-            hint = "Filter mode: channel IDs auto-discovered from data."
-        self.lbl_draw_preview.setText(hint)
         self._update_preview()
 
     def _update_preview(self):
@@ -501,7 +489,6 @@ class LoadDialog(QDialog):
         use_tree = self.rb_tree.isChecked()
         self.tree_group.setVisible(use_tree)
         self.hist_group.setVisible(not use_tree)
-        # Re-apply draw mode visibility when switching between tree/hist
         if use_tree:
             self._on_draw_mode(self.cb_draw_mode.currentIndex())
         else:
@@ -521,7 +508,6 @@ class LoadDialog(QDialog):
             self.result_ch_step     = self.sb_ch_step.value()
             self.result_max_entries = self.sb_max_entries.value()
 
-            # Parse custom channel list
             raw = self.le_ch_list.text().strip()
             if raw:
                 try:
@@ -542,8 +528,6 @@ class LoadDialog(QDialog):
 class AssignEnergyDialog(QDialog):
     """Assign a known energy to a detected peak ADC position."""
 
-    # Common gamma-ray energies from frequently used sources
-    # User can always type any value freely
     COMMON_SOURCES = [
         ("511.0",   "Na-22 / annihilation"),
         ("1274.5",  "Na-22"),
@@ -564,7 +548,6 @@ class AssignEnergyDialog(QDialog):
         self.setWindowTitle("Assign Known Energy to Peak")
         self.setMinimumWidth(480)
         layout = QVBoxLayout(self)
-
         form = QFormLayout()
 
         self.sb_adc = QDoubleSpinBox()
@@ -572,14 +555,10 @@ class AssignEnergyDialog(QDialog):
         self.sb_adc.setDecimals(3)
         self.sb_adc.setValue(adc_position)
 
-        # Free energy entry — user can type anything
         self.sb_energy = QDoubleSpinBox()
         self.sb_energy.setRange(0, 1e9)
         self.sb_energy.setDecimals(3)
         self.sb_energy.setValue(0.0)
-        self.sb_energy.setToolTip(
-            "Enter any energy value in keV.\n"
-            "Use the quick-select table below for common sources.")
 
         self.le_label = QLineEdit()
         self.le_label.setPlaceholderText("optional label, e.g.  Cs-137  661.7 keV")
@@ -589,7 +568,6 @@ class AssignEnergyDialog(QDialog):
         form.addRow("Label:", self.le_label)
         layout.addLayout(form)
 
-        # Collapsible quick-select table
         layout.addWidget(QLabel("<b>Quick-select common gamma sources:</b>"))
         tbl = QTableWidget(len(self.COMMON_SOURCES), 2)
         tbl.setHorizontalHeaderLabels(["Energy (keV)", "Source"])
@@ -600,11 +578,9 @@ class AssignEnergyDialog(QDialog):
         for row, (e, src) in enumerate(self.COMMON_SOURCES):
             tbl.setItem(row, 0, QTableWidgetItem(e))
             tbl.setItem(row, 1, QTableWidgetItem(src))
-        tbl.cellDoubleClicked.connect(self._quick_select)
         tbl.cellClicked.connect(self._quick_select)
+        tbl.cellDoubleClicked.connect(self._quick_select)
         layout.addWidget(tbl)
-        layout.addWidget(QLabel(
-            "<i>Click a row to select that energy, or type any value above.</i>"))
 
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         btns.accepted.connect(self.accept)
@@ -620,13 +596,10 @@ class AssignEnergyDialog(QDialog):
 
 
 # ======================================================================== #
-# Main Window
+# Progress dialog
 # ======================================================================== #
 
-
 class _LoadingProgressDialog(QDialog):
-    """Non-blocking progress dialog shown while loading TTree channels."""
-
     def __init__(self, title: str, n_channels: int, parent=None):
         super().__init__(parent,
             Qt.WindowTitleHint | Qt.CustomizeWindowHint)
@@ -646,6 +619,10 @@ class _LoadingProgressDialog(QDialog):
         QApplication.processEvents()
 
 
+# ======================================================================== #
+# Main Window
+# ======================================================================== #
+
 class MainWindow(QMainWindow):
 
     def __init__(self):
@@ -658,7 +635,7 @@ class MainWindow(QMainWindow):
         self.fitter           = CalibrationFitter()
         self.fit_results: dict = {}
         self.current_channel: int = -1
-        self._detected_positions: list[float] = []   # TSpectrum results
+        self._detected_positions: list = []
         self._click_mode = False
 
         self._build_ui()
@@ -682,7 +659,7 @@ class MainWindow(QMainWindow):
 
         left = self._build_left_panel()
         left.setMinimumWidth(300)
-        left.setMaximumWidth(400)
+        left.setMaximumWidth(410)
         splitter.addWidget(left)
 
         self.tabs = QTabWidget()
@@ -696,8 +673,7 @@ class MainWindow(QMainWindow):
         self._build_calib_spectrum_tab()
         self._build_resolution_tab()
 
-        self.statusBar().showMessage(
-            "Ready — open a ROOT file to begin.")
+        self.statusBar().showMessage("Ready — open a ROOT file to begin.")
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
         self.progress_bar.setMaximumWidth(220)
@@ -718,27 +694,22 @@ class MainWindow(QMainWindow):
         self.lbl_file.setObjectName("fileLabel")
         layout.addWidget(self.lbl_file, stretch=1)
 
-        # Model selector in toolbar
         layout.addWidget(QLabel("Model:"))
         self.cb_model = QComboBox()
-        self.cb_model.addItem("Linear  E = P0 + P1·Q",                      "linear")
-        self.cb_model.addItem("Nonlinear  E = P0·(P1^Q)^P2 + P3·Q − P0",   "nonlinear")
+        self.cb_model.addItem("Linear  E = P0 + P1·Q",                            "linear")
+        self.cb_model.addItem("Nonlinear  E = P0·(P1^Q)^P2 + P3·Q − P0",         "nonlinear")
+        self.cb_model.addItem("Nonlinear 3-pt  E = P0·P1^Q + P3·Q − P0 (P2=1)",  "nonlinear_3pt")
         self.cb_model.addItem("Custom", "custom")
-        self.cb_model.setMinimumWidth(300)
+        self.cb_model.setMinimumWidth(340)
         self.cb_model.currentIndexChanged.connect(self._on_model_changed)
         layout.addWidget(self.cb_model)
+
         self.le_custom_expr = QLineEdit()
         self.le_custom_expr.setPlaceholderText(
             "Custom expression, e.g.:  a*x**2 + b*x + c   (x = ADC value)")
         self.le_custom_expr.setEnabled(False)
-        self.le_custom_expr.setMinimumWidth(320)
+        self.le_custom_expr.setMinimumWidth(300)
         layout.addWidget(self.le_custom_expr)
-
-
-        #self.btn_fit_all = QPushButton("⚡ Fit All Channels")
-        #self.btn_fit_all.setEnabled(False)
-        #self.btn_fit_all.clicked.connect(self._fit_all)
-        #layout.addWidget(self.btn_fit_all)
 
         self.btn_export = QPushButton("Export")
         self.btn_export.setEnabled(False)
@@ -753,7 +724,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(10)
 
-        # ── Channel navigation ─────────────────────────────────────── #
+        # ── Channel navigation ──────────────────────────────────────── #
         nav_box = QGroupBox("Channel")
         nav_l   = QVBoxLayout(nav_box)
         nav_h   = QHBoxLayout()
@@ -775,7 +746,7 @@ class MainWindow(QMainWindow):
         nav_l.addWidget(self.lbl_ch_info)
         layout.addWidget(nav_box)
 
-        # ── Peak detection (TSpectrum) ─────────────────────────────── #
+        # ── Peak detection ──────────────────────────────────────────── #
         det_box = QGroupBox("Peak Detection  (TSpectrum / scipy)")
         det_l   = QVBoxLayout(det_box)
 
@@ -784,8 +755,6 @@ class MainWindow(QMainWindow):
         self.sl_threshold = QSlider(Qt.Horizontal)
         self.sl_threshold.setRange(1, 50)
         self.sl_threshold.setValue(5)
-        self.sl_threshold.setTickInterval(5)
-        self.sl_threshold.setTickPosition(QSlider.TicksBelow)
         self.lbl_threshold = QLabel("0.05")
         self.sl_threshold.valueChanged.connect(
             lambda v: self.lbl_threshold.setText(f"{v/100:.2f}"))
@@ -810,6 +779,20 @@ class MainWindow(QMainWindow):
         maxpk_h.addWidget(self.sb_max_peaks)
         det_l.addLayout(maxpk_h)
 
+        # ── Pedestal cut ──────────────────────────────────────────── #
+        ped_h = QHBoxLayout()
+        ped_h.addWidget(QLabel("Pedestal cut (ADC):"))
+        self.sb_pedestal = QSpinBox()
+        self.sb_pedestal.setRange(0, 100000)
+        self.sb_pedestal.setValue(0)
+        self.sb_pedestal.setSingleStep(10)
+        self.sb_pedestal.setToolTip(
+            "Ignore all peaks below this ADC value.\n"
+            "Set above the pedestal peak to avoid false detections.\n"
+            "0 = disabled.")
+        ped_h.addWidget(self.sb_pedestal)
+        det_l.addLayout(ped_h)
+
         self.btn_detect = QPushButton("🔍  Detect Peaks (Current channel)")
         self.btn_detect.setEnabled(False)
         self.btn_detect.clicked.connect(self._detect_peaks)
@@ -822,106 +805,74 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(det_box)
 
-        # ── Detected peaks table (assign energies) ─────────────────── #
+        # ── Detected peaks table ─────────────────────────────────── #
         assign_box = QGroupBox("Assign Energies to Detected Peaks")
         assign_l   = QVBoxLayout(assign_box)
-        prop_info = QLabel(
-            "Toggle 🖱 Click to select peaks manually")
-        prop_info.setWordWrap(True)
+        prop_info  = QLabel("Toggle 🖱 Click to select peaks manually")
         prop_info.setStyleSheet("font-size: 10px; color: #556;")
         assign_l.addWidget(prop_info)
 
         self.tbl_detected = QTableWidget(0, 3)
-        self.tbl_detected.setHorizontalHeaderLabels(
-            ["ADC", "Energy", "Label"])
+        self.tbl_detected.setHorizontalHeaderLabels(["ADC", "Energy", "Label"])
         self.tbl_detected.horizontalHeader().setSectionResizeMode(
             QHeaderView.Stretch)
-        self.tbl_detected.setMinimumHeight(200)
-        self.tbl_detected.setMaximumHeight(300)
+        self.tbl_detected.setMinimumHeight(140)
+        self.tbl_detected.setMaximumHeight(200)
         self.tbl_detected.itemDoubleClicked.connect(
             self._on_detected_table_dclick)
         assign_l.addWidget(self.tbl_detected)
 
         ab = QHBoxLayout()
-        ab.setSpacing(3)  # tighten gap between buttons
-
+        ab.setSpacing(3)
         self.btn_assign = QPushButton("✏ Assign")
         self.btn_assign.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.btn_assign.clicked.connect(self._assign_selected_peak)
-
         self.btn_add_manual = QPushButton("+ Manual")
         self.btn_add_manual.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.btn_add_manual.clicked.connect(lambda: self._open_assign_dialog(0.0))
-
         self.btn_click_pk = QPushButton("🖱 Click")
         self.btn_click_pk.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.btn_click_pk.setCheckable(True)
         self.btn_click_pk.toggled.connect(self._toggle_click_mode)
-
         ab.addWidget(self.btn_assign)
         ab.addWidget(self.btn_add_manual)
         ab.addWidget(self.btn_click_pk)
         assign_l.addLayout(ab)
-
-        self.btn_click_pk.setStyleSheet("""
-            QPushButton {
-                background-color: #2196F3;
-                color: white;
-                border-radius: 6px;
-                padding: 6px 12px;
-            }
-            QPushButton:hover {
-                background-color: #1976D2;
-            }
-            QPushButton:pressed {
-                background-color: #0D47A1;
-            }
-        """)
-
-
         layout.addWidget(assign_box)
 
-
-        # ── Propagate peaks to other channels ─────────────────────── #
+        # ── Propagate peaks ──────────────────────────────────────── #
         prop_box = QGroupBox("Propagate Peaks to All Channels")
         prop_l   = QVBoxLayout(prop_box)
-
-        prop_info = QLabel(
-            "search for the same peaks in every other channel "
-            "within a ± ADC window.")
-        prop_info.setWordWrap(True)
-        prop_info.setStyleSheet("font-size: 10px; color: #555;")
-        prop_l.addWidget(prop_info)
+        prop_info2 = QLabel(
+            "Search for the same peaks in every channel within ± ADC window.")
+        prop_info2.setWordWrap(True)
+        prop_info2.setStyleSheet("font-size: 10px; color: #555;")
+        prop_l.addWidget(prop_info2)
 
         win_h = QHBoxLayout()
         win_h.addWidget(QLabel("Search window (± ADC):"))
         self.sb_prop_window = QSpinBox()
         self.sb_prop_window.setRange(1, 10000)
-        self.sb_prop_window.setValue(10)
+        self.sb_prop_window.setValue(50)
         self.sb_prop_window.setToolTip(
-            "Half-width of ADC search window around each peak position.\n"
-            "e.g. 50 means ± 50 ADC counts around the reference position.")
+            "Half-width of ADC search window around each reference peak.\n"
+            "e.g. 50 means ± 50 ADC counts.")
         win_h.addWidget(self.sb_prop_window)
         prop_l.addLayout(win_h)
 
         src_h = QHBoxLayout()
         src_h.addWidget(QLabel("Use peaks from:"))
         self.cb_prop_source = QComboBox()
-        self.cb_prop_source.addItem("Current channel (detected + assigned)", "current")
+        self.cb_prop_source.addItem("Current channel (assigned peaks)", "current")
         self.cb_prop_source.addItem("Global peak list only", "global")
         src_h.addWidget(self.cb_prop_source, stretch=1)
         prop_l.addLayout(src_h)
 
-        self.chk_prop_override = QCheckBox(
-            "Create per-channel overrides")
+        self.chk_prop_override = QCheckBox("Create per-channel overrides (recommended)")
         self.chk_prop_override.setChecked(True)
-        self.chk_prop_override.setToolTip(
-            "Each channel gets its own peak list with positions refined "
-            "to the local maximum inside the search window.")
         prop_l.addWidget(self.chk_prop_override)
 
-        self.btn_propagate = QPushButton(
-            "Propagate Peaks → All Channels")
+        self.btn_propagate = QPushButton("Propagate Peaks → All Channels")
         self.btn_propagate.setEnabled(False)
         self.btn_propagate.clicked.connect(self._propagate_peaks)
         prop_l.addWidget(self.btn_propagate)
@@ -930,29 +881,22 @@ class MainWindow(QMainWindow):
         self.lbl_prop_status.setWordWrap(True)
         self.lbl_prop_status.setStyleSheet("font-size: 10px; color: #555;")
         prop_l.addWidget(self.lbl_prop_status)
-
         layout.addWidget(prop_box)
 
-        
-
-        # ── Assigned calibration points ────────────────────────────── #
+        # ── Calibration points table ─────────────────────────────── #
         cal_box = QGroupBox("Calibration Points (Current channel)")
         cal_l   = QVBoxLayout(cal_box)
         self.tbl_cal = QTableWidget(0, 3)
-        self.tbl_cal.setHorizontalHeaderLabels(
-            ["ADC", "Energy", "Label"])
-        self.tbl_cal.horizontalHeader().setSectionResizeMode(
-            QHeaderView.Stretch)
-        self.tbl_cal.setMinimumHeight(180)
-        self.tbl_cal.setMaximumHeight(280)
+        self.tbl_cal.setHorizontalHeaderLabels(["ADC", "Energy", "Label"])
+        self.tbl_cal.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.tbl_cal.setMinimumHeight(120)
+        self.tbl_cal.setMaximumHeight(200)
         cal_l.addWidget(self.tbl_cal)
 
         cb2 = QHBoxLayout()
         self.btn_del_cal    = QPushButton("− Remove")
         self.btn_del_cal.clicked.connect(self._delete_cal_point)
         self.btn_use_global = QPushButton("↑ Use Global")
-        self.btn_use_global.setToolTip(
-            "Apply global peaks to all channels as default")
         self.btn_use_global.clicked.connect(self._reset_to_global)
         cb2.addWidget(self.btn_del_cal)
         cb2.addWidget(self.btn_use_global)
@@ -961,10 +905,9 @@ class MainWindow(QMainWindow):
         self.chk_override = QCheckBox("Override: use channel-specific peaks")
         self.chk_override.toggled.connect(self._on_override_toggled)
         cal_l.addWidget(self.chk_override)
-
         layout.addWidget(cal_box)
 
-        # ── Fit single channel ─────────────────────────────────────── #
+        # ── Fit buttons ──────────────────────────────────────────── #
         self.btn_fit_one = QPushButton("▶  Fit This Channel")
         self.btn_fit_one.setEnabled(False)
         self.btn_fit_one.clicked.connect(self._fit_current)
@@ -1005,8 +948,11 @@ class MainWindow(QMainWindow):
         tab    = QWidget()
         layout = QVBoxLayout(tab)
         layout.setContentsMargins(4, 4, 4, 4)
-        info = QLabel("To load all channels, find peaks in one channel.\nClick any thumbnail to open that channel. "
-                       "Green = good fit | Red = bad channel.")
+        info = QLabel(
+            "Thumbnail grid of all channels.  "
+            "Click any thumbnail to open that channel. "
+            "Green = good fit | Red = bad channel | "
+            "Grey = not yet fitted.")
         info.setStyleSheet("color: #555; font-size: 11px;")
         layout.addWidget(info)
         self.overview_grid = OverviewGrid()
@@ -1021,7 +967,7 @@ class MainWindow(QMainWindow):
         ctrl = QHBoxLayout()
         ctrl.addWidget(QLabel("Parameter:"))
         self.cb_trend_param = QComboBox()
-        self.cb_trend_param.addItems(["P0", "P1", "P2", "P3"])
+        self.cb_trend_param.addItems(["P0", "P1"])
         self.cb_trend_param.currentIndexChanged.connect(self._update_trends)
         ctrl.addWidget(self.cb_trend_param)
         ctrl.addStretch()
@@ -1086,8 +1032,11 @@ class MainWindow(QMainWindow):
         self.btn_detect.setEnabled(True)
         n       = len(self.loader.spectra)
         backend = self.loader.backend.upper()
-        # Keep calib spectrum tab in sync with new loader
         self._calib_spectrum_tab.inject(self.loader, self.fit_results)
+
+        # Populate overview grid immediately after loading (no fit results yet)
+        self.overview_grid.populate(self.loader.spectra, None)
+
         self.statusBar().showMessage(
             f"Loaded {n} channel(s) from {os.path.basename(path)}"
             f"  [{backend} backend]")
@@ -1141,13 +1090,10 @@ class MainWindow(QMainWindow):
 
         self.spectrum_canvas.plot_spectrum(
             sp.bin_centers, sp.counts,
-            title=f"Channel {ch_id} — {sp.n_entries} entries  "
-                  f"({sp.source})")
+            title=f"Channel {ch_id} — {sp.n_entries} entries  ({sp.source})")
 
-        # Draw detected (orange) then assigned (green)
         if self._detected_positions:
-            self.spectrum_canvas.draw_detected_peaks(
-                self._detected_positions)
+            self.spectrum_canvas.draw_detected_peaks(self._detected_positions)
         assigned = self.peak_mgr.get_peaks(ch_id)
         if assigned:
             self.spectrum_canvas.draw_assigned_peaks(assigned)
@@ -1161,7 +1107,10 @@ class MainWindow(QMainWindow):
         r = self.fit_results.get(ch_id)
         if r:
             status = "❌ BAD" if r.bad_channel else "✅ OK"
-            info  += f"\nFit     : {status}  χ²/NDF={r.chi2_ndf:.4f}"
+            chi2_s = f"{r.chi2_ndf:.4f}" if r.ndf > 0 else "exact"
+            info  += f"\nFit     : {status}  χ²/NDF={chi2_s}"
+            if r.note:
+                info += f"\nNote    : {r.note[:60]}"
         self.lbl_ch_info.setText(info)
 
     def _update_override_ui(self, ch_id: int):
@@ -1180,27 +1129,23 @@ class MainWindow(QMainWindow):
         if sp is None:
             return
 
-        threshold = self.sl_threshold.value() / 100.0
-        sigma     = self.sb_sigma.value()
-        max_peaks = self.sb_max_peaks.value()
-        backend   = self.loader.backend
+        threshold    = self.sl_threshold.value() / 100.0
+        sigma        = self.sb_sigma.value()
+        max_peaks    = self.sb_max_peaks.value()
+        pedestal_cut = float(self.sb_pedestal.value())
+        backend      = self.loader.backend
 
         positions = PeakManager.detect_peaks(
             sp.bin_centers, sp.counts,
             sigma=sigma, threshold=threshold,
-            max_peaks=max_peaks, backend=backend)
+            max_peaks=max_peaks, backend=backend,
+            pedestal_cut=pedestal_cut)
 
         self._detected_positions = positions
 
         if not positions:
             self.lbl_detected.setText(
                 "No peaks found — try lowering threshold or increasing sigma.")
-            QMessageBox.information(
-                self, "No Peaks",
-                "No peaks detected. Try:\n"
-                "  • Lowering the threshold\n"
-                "  • Increasing sigma\n"
-                "  • Using 'Click' mode to mark peaks manually")
             return
 
         self.lbl_detected.setText(
@@ -1209,19 +1154,14 @@ class MainWindow(QMainWindow):
             + ", ".join(f"{p:.1f}" for p in positions))
         self.btn_propagate.setEnabled(True)
 
-        # Populate detected peaks table (energy column = unassigned)
         self.tbl_detected.setRowCount(0)
         for pos in positions:
             row = self.tbl_detected.rowCount()
             self.tbl_detected.insertRow(row)
-            self.tbl_detected.setItem(
-                row, 0, QTableWidgetItem(f"{pos:.2f}"))
-            self.tbl_detected.setItem(
-                row, 1, QTableWidgetItem("—  (double-click to assign)"))
-            self.tbl_detected.setItem(
-                row, 2, QTableWidgetItem(""))
+            self.tbl_detected.setItem(row, 0, QTableWidgetItem(f"{pos:.2f}"))
+            self.tbl_detected.setItem(row, 1, QTableWidgetItem("—  (double-click to assign)"))
+            self.tbl_detected.setItem(row, 2, QTableWidgetItem(""))
 
-        # Draw on spectrum
         self.spectrum_canvas.plot_spectrum(
             sp.bin_centers, sp.counts,
             title=f"Channel {ch_id} — {sp.n_entries} entries")
@@ -1238,8 +1178,7 @@ class MainWindow(QMainWindow):
         row = item.row()
         adc_item = self.tbl_detected.item(row, 0)
         if adc_item:
-            adc = float(adc_item.text())
-            self._open_assign_dialog(adc)
+            self._open_assign_dialog(float(adc_item.text()))
 
     def _assign_selected_peak(self):
         row = self.tbl_detected.currentRow()
@@ -1253,15 +1192,16 @@ class MainWindow(QMainWindow):
         dlg = AssignEnergyDialog(adc_pos, self)
         if dlg.exec_() != QDialog.Accepted:
             return
-        adc = dlg.sb_adc.value()
-        eng = dlg.sb_energy.value()
-        lbl = dlg.le_label.text()
+        adc   = dlg.sb_adc.value()
+        eng   = dlg.sb_energy.value()
+        lbl   = dlg.le_label.text()
         ch_id = self.current_channel
 
-        if self.chk_override.isChecked():
-            self.peak_mgr.add_channel_peak(ch_id, adc, eng, lbl)
-        else:
-            self.peak_mgr.add_global_peak(adc, eng, lbl)
+        # Always create a channel-specific override when assigning
+        self.peak_mgr.add_channel_peak(ch_id, adc, eng, lbl)
+        self.chk_override.blockSignals(True)
+        self.chk_override.setChecked(True)
+        self.chk_override.blockSignals(False)
 
         self._refresh_cal_table(ch_id)
         self._update_detail_view(ch_id)
@@ -1282,7 +1222,7 @@ class MainWindow(QMainWindow):
         ch_id = self.current_channel
         if row < 0 or ch_id < 0:
             return
-        if self.chk_override.isChecked():
+        if self.peak_mgr.has_override(ch_id):
             self.peak_mgr.remove_channel_peak(ch_id, row)
         else:
             self.peak_mgr.remove_global_peak(row)
@@ -1315,26 +1255,26 @@ class MainWindow(QMainWindow):
         for p in peaks:
             row = self.tbl_cal.rowCount()
             self.tbl_cal.insertRow(row)
-            self.tbl_cal.setItem(
-                row, 0, QTableWidgetItem(f"{p.adc_position:.2f}"))
-            self.tbl_cal.setItem(
-                row, 1, QTableWidgetItem(f"{p.known_energy:.2f}"))
-            self.tbl_cal.setItem(
-                row, 2, QTableWidgetItem(p.label))
+            self.tbl_cal.setItem(row, 0, QTableWidgetItem(f"{p.adc_position:.2f}"))
+            self.tbl_cal.setItem(row, 1, QTableWidgetItem(f"{p.known_energy:.2f}"))
+            self.tbl_cal.setItem(row, 2, QTableWidgetItem(p.label))
 
     # ------------------------------------------------------------------ #
-    # Fitting
+    # Propagate peaks — FIXED
     # ------------------------------------------------------------------ #
 
     def _propagate_peaks(self):
         """
-        For each peak assigned on the reference channel (current or global),
-        search all other channels for the best matching peak within
-        ± sb_prop_window ADC counts and assign it with the same known energy.
+        For each peak assigned on the reference channel, search all other
+        channels within ± window ADC counts for a matching peak.
+
+        FIX: was requiring all reference peaks to be found before saving.
+        Now always saves what was found (even partial matches).
+        FIX: window default increased to 50 (from 10) which was too narrow.
         """
-        ref_ch  = self.current_channel
-        window  = self.sb_prop_window.value()
-        source  = self.cb_prop_source.currentData()
+        ref_ch   = self.current_channel
+        window   = self.sb_prop_window.value()
+        source   = self.cb_prop_source.currentData()
         override = self.chk_prop_override.isChecked()
 
         # Gather reference peaks
@@ -1345,8 +1285,11 @@ class MainWindow(QMainWindow):
 
         if not ref_peaks:
             QMessageBox.warning(self, "No Reference Peaks",
-                "Assign at least one peak on the current channel first, "
-                "or switch source to 'Global peak list'.")
+                "Assign at least one peak on the current channel first.\n\n"
+                "Steps:\n"
+                "1. Detect peaks with 🔍 Detect Peaks\n"
+                "2. Double-click peaks in the table to assign energies\n"
+                "3. Then click Propagate")
             return
 
         all_channels = self.loader.get_channel_ids()
@@ -1360,7 +1303,10 @@ class MainWindow(QMainWindow):
         backend = self.loader.backend
         sigma   = self.sb_sigma.value()
         thresh  = self.sl_threshold.value() / 100.0
+        ped_cut = float(self.sb_pedestal.value())
+
         n_found_total = 0
+        n_partial     = 0
         n_failed      = 0
 
         for ch_id in target_chs:
@@ -1370,26 +1316,30 @@ class MainWindow(QMainWindow):
                 continue
 
             new_peaks = PeakManager.find_peaks_in_windows(
-                bin_centers = sp.bin_centers,
-                counts      = sp.counts,
+                bin_centers     = sp.bin_centers,
+                counts          = sp.counts,
                 reference_peaks = ref_peaks,
-                window      = window,
-                sigma       = sigma,
-                threshold   = thresh,
-                backend     = backend)
+                window          = window,
+                sigma           = sigma,
+                threshold       = thresh,
+                backend         = backend,
+                pedestal_cut    = ped_cut)
 
             if not new_peaks:
                 n_failed += 1
                 continue
 
+            # Always save the found peaks — even partial matches
+            # find_peaks_in_windows guarantees one result per ref peak
             if override:
-                # Set as per-channel override
                 self.peak_mgr.set_channel_peaks(ch_id, new_peaks)
             else:
-                # Replace global peaks with found positions
-                # (only if all ref peaks were found)
+                # Without override: only apply if we got ALL reference peaks
                 if len(new_peaks) == len(ref_peaks):
                     self.peak_mgr.set_channel_peaks(ch_id, new_peaks)
+                else:
+                    n_partial += 1
+                    continue
 
             n_found_total += 1
 
@@ -1398,10 +1348,16 @@ class MainWindow(QMainWindow):
 
         msg = (f"Propagated {len(ref_peaks)} peak(s) to "
                f"{n_found_total}/{len(target_chs)} channel(s).")
+        if n_partial > 0:
+            msg += f"  ({n_partial} partial — enable 'overrides' to include.)"
         if n_failed > 0:
-            msg += f"  ({n_failed} channel(s) had no matching peaks.)"
+            msg += f"  ({n_failed} had no spectrum.)"
         self.lbl_prop_status.setText(msg)
         self.statusBar().showMessage(msg)
+
+    # ------------------------------------------------------------------ #
+    # Fitting
+    # ------------------------------------------------------------------ #
 
     def _fit_current(self):
         ch_id = self.current_channel
@@ -1418,6 +1374,9 @@ class MainWindow(QMainWindow):
         self.fit_results[ch_id] = result
         self._update_detail_view(ch_id)
         self._update_bad_label()
+
+        # ── FIX: update overview grid after single-channel fit ── #
+        self.overview_grid.populate(self.loader.spectra, self.fit_results)
 
     def _fit_all(self):
         ch_ids = self.loader.get_channel_ids()
@@ -1441,7 +1400,6 @@ class MainWindow(QMainWindow):
 
     def _on_fit_all_done(self, results: dict):
         self.fit_results = results
-        # Keep calibrated spectrum tab in sync with latest fit results
         self._calib_spectrum_tab.inject(self.loader, self.fit_results)
         self.progress_bar.setVisible(False)
         self.btn_fit_all.setEnabled(True)
@@ -1449,6 +1407,7 @@ class MainWindow(QMainWindow):
         self._update_detail_view(self.current_channel)
         self._update_bad_label()
         self._update_trends()
+        # ── Populate overview with fit results ── #
         self.overview_grid.populate(self.loader.spectra, self.fit_results)
         bad = self.fitter.bad_channels()
         self.statusBar().showMessage(
@@ -1512,17 +1471,33 @@ class MainWindow(QMainWindow):
 
     def _build_resolution_tab(self):
         self._resolution_tab = ResolutionTab()
-        # Store a direct reference so it can access calibrated spectra
         self._resolution_tab._main_window = self
         self.tabs.addTab(self._resolution_tab, "📐 Resolution")
 
     def _send_to_resolution_tab(self, ch_id: int, cal):
         self._resolution_tab.receive_spectrum(ch_id, cal)
-        # Switch to resolution tab
         for i in range(self.tabs.count()):
             if "Resolution" in self.tabs.tabText(i):
                 self.tabs.setCurrentIndex(i)
                 break
+
+    # ------------------------------------------------------------------ #
+    # Model change
+    # ------------------------------------------------------------------ #
+
+    def _on_model_changed(self, idx: int):
+        model = self.cb_model.currentData()
+        self.le_custom_expr.setEnabled(model == "custom")
+        param_names = {
+            "linear":        ["P0", "P1"],
+            "nonlinear":     ["P0", "P1", "P2", "P3"],
+            "nonlinear_3pt": ["P0", "P1", "P3"],
+            "custom":        ["p0", "p1", "p2", "p3"],
+        }.get(model, ["P0", "P1"])
+        self.cb_trend_param.blockSignals(True)
+        self.cb_trend_param.clear()
+        self.cb_trend_param.addItems(param_names)
+        self.cb_trend_param.blockSignals(False)
 
     # ------------------------------------------------------------------ #
     # Style
@@ -1552,10 +1527,7 @@ class MainWindow(QMainWindow):
                 font-weight: bold; color: #1565c0;
                 background-color: #ffffff;
             }
-            QGroupBox QPushButton {
-                padding: 4px 4px;
-                min-width: 0px;
-            }
+            QGroupBox QPushButton { padding: 4px 4px; min-width: 0px; }
             QGroupBox::title { subcontrol-origin: margin; left: 8px; }
             QComboBox, QSpinBox, QDoubleSpinBox, QLineEdit {
                 background-color: #ffffff; border: 1px solid #bdbdbd;
@@ -1604,18 +1576,3 @@ class MainWindow(QMainWindow):
             QSplitter::handle { background: #e0e0e0; }
         """)
         plt.style.use("default")
-
-    # ---- inserted methods (model change + custom expr support) ----
-
-    def _on_model_changed(self, idx: int):
-        model = self.cb_model.currentData()
-        self.le_custom_expr.setEnabled(model == "custom")
-        # Update trend param combo for nonlinear (4 params) vs linear (2)
-        param_names = {"linear": ["P0","P1"],
-                       "nonlinear": ["P0","P1","P2","P3"],
-                       "custom": ["p0","p1","p2","p3"]}.get(model, ["P0","P1"])
-        self.cb_trend_param.blockSignals(True)
-        self.cb_trend_param.clear()
-        self.cb_trend_param.addItems(param_names)
-        self.cb_trend_param.blockSignals(False)
-
