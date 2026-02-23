@@ -1,21 +1,24 @@
 """
 PeakManager
 ===========
-Manages peak detection and assignments per channel.
+Manages peak detection and energy assignments per channel.
 
-Peak detection:
-  - PyROOT backend : ROOT TSpectrum (user-triggered, threshold adjustable)
-  - uproot backend : scipy find_peaks (fallback)
+Two-phase workflow:
+  Phase 1 — Detection: TSpectrum finds raw peak positions per channel (no energy yet).
+             Stored in detected_positions[ch_id] = list[float]
+  Phase 2 — Assignment: user assigns known energies to detected positions.
+             An energy assignment on one channel propagates to all other channels
+             that have a detected peak within ± window ADC counts of the same position.
 
-Peak assignment:
-  - Detected peaks shown on spectrum, user assigns known energies
-  - Per-channel override supported
-  - Global peaks as default fallback
+Per-channel behaviour:
+  - excluded_channels  : channels skipped during energy propagation
+  - channel_peaks      : explicit peak list for a channel (overrides global)
+  - global_peaks       : fallback used when no per-channel list exists
 """
 
 from __future__ import annotations
 import numpy as np
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 from scipy.ndimage import gaussian_filter1d
 
@@ -30,14 +33,47 @@ class Peak:
 
 class PeakManager:
     """
-    Stores peak assignments.
-    global_peaks  : list[Peak]            — applied to all channels by default
-    channel_peaks : dict[int, list[Peak]] — per-channel overrides
+    detected_positions : dict[int, list[float]]   — raw ADC positions per channel (no energy)
+    channel_peaks      : dict[int, list[Peak]]    — assigned (energy-labelled) peaks per channel
+    global_peaks       : list[Peak]               — fallback for channels with no assignment
+    excluded_channels  : set[int]                 — channels excluded from energy propagation
     """
 
     def __init__(self):
-        self.global_peaks:  list[Peak]            = []
-        self.channel_peaks: dict[int, list[Peak]] = {}
+        self.detected_positions: dict[int, list[float]] = {}
+        self.global_peaks:       list[Peak]             = []
+        self.channel_peaks:      dict[int, list[Peak]]  = {}
+        self.excluded_channels:  set[int]               = set()
+
+    # ------------------------------------------------------------------ #
+    # Detected positions (Phase 1)
+    # ------------------------------------------------------------------ #
+
+    def set_detected(self, channel_id: int, positions: list[float]):
+        """Store raw detected ADC positions for a channel."""
+        self.detected_positions[channel_id] = sorted(positions)
+
+    def get_detected(self, channel_id: int) -> list[float]:
+        return self.detected_positions.get(channel_id, [])
+
+    def clear_detected(self, channel_id: int = None):
+        if channel_id is None:
+            self.detected_positions.clear()
+        else:
+            self.detected_positions.pop(channel_id, None)
+
+    # ------------------------------------------------------------------ #
+    # Exclusion (per-channel override — skip propagation)
+    # ------------------------------------------------------------------ #
+
+    def set_excluded(self, channel_id: int, excluded: bool):
+        if excluded:
+            self.excluded_channels.add(channel_id)
+        else:
+            self.excluded_channels.discard(channel_id)
+
+    def is_excluded(self, channel_id: int) -> bool:
+        return channel_id in self.excluded_channels
 
     # ------------------------------------------------------------------ #
     # Global peaks
@@ -56,7 +92,7 @@ class PeakManager:
         self.global_peaks.clear()
 
     # ------------------------------------------------------------------ #
-    # Per-channel overrides
+    # Per-channel assigned peaks
     # ------------------------------------------------------------------ #
 
     def set_channel_peaks(self, channel_id: int, peaks: list[Peak]):
@@ -77,14 +113,15 @@ class PeakManager:
         if 0 <= index < len(peaks):
             peaks.pop(index)
 
-    def reset_channel_to_global(self, channel_id: int):
+    def reset_channel(self, channel_id: int):
+        """Remove per-channel peak assignment; revert to global."""
         self.channel_peaks.pop(channel_id, None)
 
-    def has_override(self, channel_id: int) -> bool:
+    def has_channel_peaks(self, channel_id: int) -> bool:
         return channel_id in self.channel_peaks
 
     # ------------------------------------------------------------------ #
-    # Effective peaks
+    # Effective peaks (for calibration)
     # ------------------------------------------------------------------ #
 
     def get_peaks(self, channel_id: int) -> list[Peak]:
@@ -105,6 +142,55 @@ class PeakManager:
         return len(self.get_peaks(channel_id))
 
     # ------------------------------------------------------------------ #
+    # Energy propagation (Phase 2 helper)
+    # ------------------------------------------------------------------ #
+
+    def propagate_energy(self,
+                          source_adc:   float,
+                          known_energy: float,
+                          label:        str,
+                          window:       float,
+                          all_channels: list[int],
+                          source_ch:    int) -> list[int]:
+        """
+        For every channel (except source_ch and excluded channels) that has a
+        detected peak within source_adc ± window, assign known_energy to that
+        detected position.
+
+        Returns list of channel IDs that received the assignment.
+        """
+        updated = []
+        for ch_id in all_channels:
+            if ch_id == source_ch:
+                continue
+            if ch_id in self.excluded_channels:
+                continue
+            detected = self.detected_positions.get(ch_id, [])
+            if not detected:
+                continue
+            # Find the closest detected peak within window
+            dists = [(abs(p - source_adc), p) for p in detected]
+            dists.sort()
+            if dists and dists[0][0] <= window:
+                best_adc = dists[0][1]
+                # Add or update this energy assignment in channel peaks
+                if ch_id not in self.channel_peaks:
+                    self.channel_peaks[ch_id] = []
+                # Remove any existing assignment at this ADC (within tiny tolerance)
+                tol = window * 0.1
+                self.channel_peaks[ch_id] = [
+                    p for p in self.channel_peaks[ch_id]
+                    if abs(p.adc_position - best_adc) > tol
+                ]
+                self.channel_peaks[ch_id].append(
+                    Peak(adc_position=best_adc,
+                         known_energy=known_energy,
+                         label=label,
+                         auto_detected=True))
+                updated.append(ch_id)
+        return updated
+
+    # ------------------------------------------------------------------ #
     # Peak detection — TSpectrum (PyROOT)
     # ------------------------------------------------------------------ #
 
@@ -118,17 +204,18 @@ class PeakManager:
                                 ) -> list[float]:
         """
         Detect peaks using ROOT TSpectrum.
-        pedestal_cut : ignore all ADC bins below this value (excludes pedestal).
-                       Slices the arrays rather than zeroing, so TSpectrum's
-                       relative threshold is computed only over physics peaks.
+        pedestal_cut : ignore all ADC bins below this value.
+
+        Ownership fix: SetDirectory(0) detaches the histogram from gDirectory
+        so ROOT never double-deletes it when Python GC runs.  ROOT stderr is
+        suppressed during the call to silence residual TList warnings.
         """
+        import sys, os
         try:
             import ROOT
-            import array as arr
 
-            # Apply pedestal cut by slicing arrays
             if pedestal_cut > 0:
-                mask = bin_centers >= pedestal_cut
+                mask        = bin_centers >= pedestal_cut
                 bin_centers = bin_centers[mask]
                 counts      = counts[mask]
 
@@ -136,27 +223,56 @@ class PeakManager:
                 return []
 
             n = len(counts)
-            h = ROOT.TH1F("_tspec_tmp", "", n,
-                           float(bin_centers[0]),
-                           float(bin_centers[-1]))
-            for i, c in enumerate(counts):
-                h.SetBinContent(i + 1, float(c))
 
-            sp      = ROOT.TSpectrum(max_peaks)
-            n_found = sp.Search(h, sigma, "nobackground nodraw", threshold)
+            # Suppress ROOT stderr noise (TList::Clear warnings) ──────────
+            devnull_fd  = os.open(os.devnull, os.O_WRONLY)
+            saved_stderr = os.dup(2)
+            os.dup2(devnull_fd, 2)
+            os.close(devnull_fd)
 
-            positions = []
-            px = sp.GetPositionX()
-            for i in range(n_found):
-                positions.append(float(px[i]))
+            try:
+                # Use a unique name to avoid gDirectory collisions
+                import threading
+                hname = f"_tspec_{threading.get_ident()}_{id(bin_centers)}"
+                h = ROOT.TH1F(hname, "", n,
+                               float(bin_centers[0]),
+                               float(bin_centers[-1]))
+                # Detach from gDirectory immediately — Python owns this object
+                h.SetDirectory(ROOT.nullptr)
+                ROOT.SetOwnership(h, True)
 
-            ROOT.gDirectory.Delete("_tspec_tmp")
-            return sorted(positions)
+                for i, c in enumerate(counts):
+                    h.SetBinContent(i + 1, float(c))
+
+                sp      = ROOT.TSpectrum(max_peaks)
+                n_found = sp.Search(h, sigma, "nobackground nodraw", threshold)
+
+                positions = []
+                px = sp.GetPositionX()
+                for i in range(n_found):
+                    positions.append(float(px[i]))
+
+                # Copy results before deleting
+                result = sorted(positions)
+
+            finally:
+                # Restore stderr
+                os.dup2(saved_stderr, 2)
+                os.close(saved_stderr)
+                # Explicitly delete ROOT objects to avoid TList race
+                try:
+                    del sp
+                    h.Delete()
+                    del h
+                except Exception:
+                    pass
+
+            return result
 
         except Exception:
             return PeakManager.detect_peaks_scipy(
                 bin_centers, counts, sigma, threshold, max_peaks,
-                pedestal_cut=0.0)  # already sliced above
+                pedestal_cut=0.0)
 
     # ------------------------------------------------------------------ #
     # Peak detection — scipy fallback
@@ -170,13 +286,9 @@ class PeakManager:
                             max_peaks: int = 10,
                             pedestal_cut: float = 0.0
                             ) -> list[float]:
-        """
-        Detect peaks using scipy.signal.find_peaks.
-        pedestal_cut : ignore ADC bins below this value.
-        """
+        """Detect peaks using scipy.signal.find_peaks."""
         from scipy.signal import find_peaks as sp_find_peaks
 
-        # Apply pedestal cut by slicing
         if pedestal_cut > 0:
             mask        = bin_centers >= pedestal_cut
             bin_centers = bin_centers[mask]
@@ -199,10 +311,10 @@ class PeakManager:
         top   = indices[order[:max_peaks]]
 
         positions = []
-        window = max(3, int(len(counts) * 0.01))
+        window_w = max(3, int(len(counts) * 0.01))
         for idx in top:
-            lo = max(0, idx - window)
-            hi = min(len(counts), idx + window + 1)
+            lo = max(0, idx - window_w)
+            hi = min(len(counts), idx + window_w + 1)
             w  = counts[lo:hi]
             c  = bin_centers[lo:hi]
             centroid = float(np.sum(c * w) / w.sum()) if w.sum() > 0 \
@@ -233,89 +345,3 @@ class PeakManager:
             return PeakManager.detect_peaks_scipy(
                 bin_centers, counts, sigma, threshold, max_peaks,
                 pedestal_cut=pedestal_cut)
-
-    # ------------------------------------------------------------------ #
-    # find_peaks_in_windows — used by propagate
-    # ------------------------------------------------------------------ #
-
-    @staticmethod
-    def find_peaks_in_windows(bin_centers: np.ndarray,
-                               counts:      np.ndarray,
-                               reference_peaks: list,
-                               window:      float,
-                               sigma:       float = 2.0,
-                               threshold:   float = 0.05,
-                               backend:     str   = "pyroot",
-                               pedestal_cut: float = 0.0
-                               ) -> list:
-        """
-        For each reference peak, search inside [ref_adc - window, ref_adc + window]
-        for the best matching local maximum in this channel's spectrum.
-
-        Returns a list[Peak] with same known_energy as reference peaks but
-        ADC positions refined to this channel. Every reference peak gets a
-        result — falls back to centroid or reference position if no peak found.
-        """
-        result = []
-        smooth = gaussian_filter1d(counts.astype(float), sigma=max(1, sigma))
-
-        for ref_peak in reference_peaks:
-            ref_adc = ref_peak.adc_position
-            lo      = ref_adc - window
-            hi      = ref_adc + window
-
-            # Slice spectrum to window
-            mask = (bin_centers >= lo) & (bin_centers <= hi)
-            if mask.sum() < 3:
-                # Window too narrow / outside spectrum — keep reference position
-                result.append(Peak(
-                    adc_position  = ref_adc,
-                    known_energy  = ref_peak.known_energy,
-                    label         = ref_peak.label,
-                    auto_detected = True))
-                continue
-
-            win_centers = bin_centers[mask]
-            win_counts  = smooth[mask]
-            raw_counts  = counts[mask]
-
-            # Try peak detection inside the window
-            found_pos = None
-            try:
-                if backend == "pyroot":
-                    candidates = PeakManager.detect_peaks_tspectrum(
-                        win_centers, raw_counts,
-                        sigma=sigma, threshold=0.01, max_peaks=5,
-                        pedestal_cut=0.0)
-                else:
-                    candidates = PeakManager.detect_peaks_scipy(
-                        win_centers, raw_counts,
-                        sigma=sigma, threshold=0.01, max_peaks=5,
-                        pedestal_cut=0.0)
-
-                if candidates:
-                    # Take candidate closest to reference position
-                    found_pos = min(candidates, key=lambda x: abs(x - ref_adc))
-            except Exception:
-                pass
-
-            if found_pos is None:
-                # Fallback: centroid around local maximum in window
-                idx_max = int(np.argmax(win_counts))
-                half_w  = max(2, int(len(win_counts) * 0.1))
-                lo_i    = max(0, idx_max - half_w)
-                hi_i    = min(len(win_counts), idx_max + half_w + 1)
-                w_slice = win_counts[lo_i:hi_i]
-                c_slice = win_centers[lo_i:hi_i]
-                if w_slice.sum() > 0:
-                    found_pos = float(np.sum(c_slice * w_slice) / w_slice.sum())
-                else:
-                    found_pos = ref_adc
-
-            result.append(Peak(
-                adc_position  = found_pos,
-                known_energy  = ref_peak.known_energy,
-                label         = ref_peak.label,
-                auto_detected = True))
-
-        return result

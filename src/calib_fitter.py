@@ -5,7 +5,9 @@ Supported models:
 
   linear       (default):  E = P0 + P1·Q
   nonlinear:               E = P0·(P1^Q)^P2 + P3·Q − P0
+                           Initial guess: (P0,P1,P2,P3) = (20, 1.10, 1.05, 8.4)
   nonlinear_3pt:           E = P0·P1^Q + P3·Q − P0  (P2=1, for 3-point fits)
+                           Initial guess: (P0,P1,P3) = (20, 1.10, 8.4)
   custom:                  user-defined expression, e.g.  a*x**2 + b*x + c
 
 Where Q = raw ADC value.
@@ -274,9 +276,13 @@ class CalibrationFitter:
         if model == "linear":
             return [inter, max(slope, 1e-6)]
         elif model == "nonlinear":
-            return [10.0, 0.999, 1.0, max(slope, 1e-6)]
+            # Best-known starting point for GAGG/LYSO detectors:
+            # E = P0*(P1^Q)^P2 + P3*Q - P0
+            # (P0, P1, P2, P3) = (20, 1.10, 1.05, 8.4)
+            return [20.0, 1.10, 1.05, 8.4]
         elif model == "nonlinear_3pt":
-            return [10.0, 0.999, max(slope, 1e-6)]
+            # 3-point variant with P2=1: E = P0*P1^Q + P3*Q - P0
+            return [20.0, 1.10, 8.4]
         else:
             p0     = [1.0] * n_params
             p0[-1] = slope

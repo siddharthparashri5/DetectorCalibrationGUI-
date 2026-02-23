@@ -385,7 +385,7 @@ class LoadDialog(QDialog):
         layout.addWidget(self.tree_group)
 
         # Channel range — only shown for array/custom modes
-        self.ch_range_box = QGroupBox("Channel Range (Array / Custom modes only)")
+        self.ch_range_box = QGroupBox("Channel Range")
         cr = QFormLayout(self.ch_range_box)
 
         range_h = QHBoxLayout()
@@ -466,8 +466,8 @@ class LoadDialog(QDialog):
 
         self.cb_channel_branch.setEnabled(is_filt)
         self.le_draw_custom.setEnabled(is_cust)
-        # Channel range only needed for array and custom modes
-        self.ch_range_box.setVisible(is_arr or is_cust)
+        # Channel range always visible — useful in all modes
+        self.ch_range_box.setVisible(True)
         self._update_preview()
 
     def _update_preview(self):
@@ -489,6 +489,7 @@ class LoadDialog(QDialog):
         use_tree = self.rb_tree.isChecked()
         self.tree_group.setVisible(use_tree)
         self.hist_group.setVisible(not use_tree)
+        # Channel range always visible for TTree, hidden for TH1
         if use_tree:
             self._on_draw_mode(self.cb_draw_mode.currentIndex())
         else:
@@ -637,6 +638,7 @@ class MainWindow(QMainWindow):
         self.current_channel: int = -1
         self._detected_positions: list = []
         self._click_mode = False
+        self._last_assigned: dict | None = None  # {adc, energy, label}
 
         self._build_ui()
         self._apply_style()
@@ -827,9 +829,9 @@ class MainWindow(QMainWindow):
         self.btn_assign = QPushButton("✏ Assign")
         self.btn_assign.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.btn_assign.clicked.connect(self._assign_selected_peak)
-        self.btn_add_manual = QPushButton("+ Manual")
+        self.btn_add_manual = QPushButton("+ Manual (all ch.)")
         self.btn_add_manual.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.btn_add_manual.clicked.connect(lambda: self._open_assign_dialog(0.0))
+        self.btn_add_manual.clicked.connect(self._add_manual_point_all)
         self.btn_click_pk = QPushButton("🖱 Click")
         self.btn_click_pk.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.btn_click_pk.setCheckable(True)
@@ -840,14 +842,25 @@ class MainWindow(QMainWindow):
         assign_l.addLayout(ab)
         layout.addWidget(assign_box)
 
-        # ── Propagate peaks ──────────────────────────────────────── #
-        prop_box = QGroupBox("Propagate Peaks to All Channels")
+        # ── Detect peaks in all channels ──────────────────────────── #
+        prop_box = QGroupBox("Detect Peaks in All Channels")
         prop_l   = QVBoxLayout(prop_box)
         prop_info2 = QLabel(
-            "Search for the same peaks in every channel within ± ADC window.")
+            "After assigning an energy on the current channel, click below "
+            "to find that same peak in every channel (TSpectrum within ± window) "
+            "and add it to each channel's calibration points. "
+            "Repeat for every peak you want. Manual points (e.g. 0 ADC = 0 keV) "
+            "are added to all channels directly.")
         prop_info2.setWordWrap(True)
         prop_info2.setStyleSheet("font-size: 10px; color: #555;")
         prop_l.addWidget(prop_info2)
+
+        self.lbl_last_assigned = QLabel("No peak assigned yet.")
+        self.lbl_last_assigned.setWordWrap(True)
+        self.lbl_last_assigned.setStyleSheet(
+            "font-size: 10px; color: #226; font-weight: bold; "
+            "background: #eef; border-radius: 3px; padding: 2px;")
+        prop_l.addWidget(self.lbl_last_assigned)
 
         win_h = QHBoxLayout()
         win_h.addWidget(QLabel("Search window (± ADC):"))
@@ -855,26 +868,16 @@ class MainWindow(QMainWindow):
         self.sb_prop_window.setRange(1, 10000)
         self.sb_prop_window.setValue(50)
         self.sb_prop_window.setToolTip(
-            "Half-width of ADC search window around each reference peak.\n"
-            "e.g. 50 means ± 50 ADC counts.")
+            "Half-width of the ADC search window around each peak.\n"
+            "TSpectrum re-detects each peak within this window\n"
+            "for every channel independently.\n"
+            "e.g. 50 means ± 50 ADC counts around the reference position.")
         win_h.addWidget(self.sb_prop_window)
         prop_l.addLayout(win_h)
 
-        src_h = QHBoxLayout()
-        src_h.addWidget(QLabel("Use peaks from:"))
-        self.cb_prop_source = QComboBox()
-        self.cb_prop_source.addItem("Current channel (assigned peaks)", "current")
-        self.cb_prop_source.addItem("Global peak list only", "global")
-        src_h.addWidget(self.cb_prop_source, stretch=1)
-        prop_l.addLayout(src_h)
-
-        self.chk_prop_override = QCheckBox("Create per-channel overrides (recommended)")
-        self.chk_prop_override.setChecked(True)
-        prop_l.addWidget(self.chk_prop_override)
-
-        self.btn_propagate = QPushButton("Propagate Peaks → All Channels")
+        self.btn_propagate = QPushButton("🔍  Detect Last Peak → All Channels")
         self.btn_propagate.setEnabled(False)
-        self.btn_propagate.clicked.connect(self._propagate_peaks)
+        self.btn_propagate.clicked.connect(self._detect_peaks_all_channels)
         prop_l.addWidget(self.btn_propagate)
 
         self.lbl_prop_status = QLabel("")
@@ -902,8 +905,12 @@ class MainWindow(QMainWindow):
         cb2.addWidget(self.btn_use_global)
         cal_l.addLayout(cb2)
 
-        self.chk_override = QCheckBox("Override: use channel-specific peaks")
-        self.chk_override.toggled.connect(self._on_override_toggled)
+        self.chk_override = QCheckBox("Exclude this channel from energy propagation")
+        self.chk_override.toggled.connect(self._on_exclude_toggled)
+        self.chk_override.setToolTip(
+            "When checked, energy assignments made on other channels\n"
+            "will NOT be propagated to this channel.\n"
+            "You can still assign energies manually here.")
         cal_l.addWidget(self.chk_override)
         layout.addWidget(cal_box)
 
@@ -1092,18 +1099,23 @@ class MainWindow(QMainWindow):
             sp.bin_centers, sp.counts,
             title=f"Channel {ch_id} — {sp.n_entries} entries  ({sp.source})")
 
-        if self._detected_positions:
-            self.spectrum_canvas.draw_detected_peaks(self._detected_positions)
+        detected = self.peak_mgr.get_detected(ch_id)
+        if detected:
+            self.spectrum_canvas.draw_detected_peaks(detected)
         assigned = self.peak_mgr.get_peaks(ch_id)
         if assigned:
             self.spectrum_canvas.draw_assigned_peaks(assigned)
 
         self.calib_canvas.plot_result(self.fit_results.get(ch_id))
+        self._refresh_detected_table(ch_id)
         self._refresh_cal_table(ch_id)
 
-        info = (f"Entries : {sp.n_entries}\n"
-                f"Source  : {sp.source}\n"
-                f"Cal pts : {self.peak_mgr.n_calibration_points(ch_id)}")
+        n_det = len(self.peak_mgr.get_detected(ch_id))
+        excl  = " ⛔ excluded" if self.peak_mgr.is_excluded(ch_id) else ""
+        info  = (f"Entries  : {sp.n_entries}\n"
+                 f"Source   : {sp.source}\n"
+                 f"Detected : {n_det} peak(s)\n"
+                 f"Cal pts  : {self.peak_mgr.n_calibration_points(ch_id)}{excl}")
         r = self.fit_results.get(ch_id)
         if r:
             status = "❌ BAD" if r.bad_channel else "✅ OK"
@@ -1114,9 +1126,9 @@ class MainWindow(QMainWindow):
         self.lbl_ch_info.setText(info)
 
     def _update_override_ui(self, ch_id: int):
-        has = self.peak_mgr.has_override(ch_id)
+        excluded = self.peak_mgr.is_excluded(ch_id)
         self.chk_override.blockSignals(True)
-        self.chk_override.setChecked(has)
+        self.chk_override.setChecked(excluded)
         self.chk_override.blockSignals(False)
 
     # ------------------------------------------------------------------ #
@@ -1124,6 +1136,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
 
     def _detect_peaks(self):
+        """Phase 1 — detect peaks on current channel. No energy assigned yet."""
         ch_id = self.current_channel
         sp    = self.loader.get_spectrum(ch_id)
         if sp is None:
@@ -1141,7 +1154,8 @@ class MainWindow(QMainWindow):
             max_peaks=max_peaks, backend=backend,
             pedestal_cut=pedestal_cut)
 
-        self._detected_positions = positions
+        # Store raw positions in manager (no energy yet)
+        self.peak_mgr.set_detected(ch_id, positions)
 
         if not positions:
             self.lbl_detected.setText(
@@ -1154,14 +1168,7 @@ class MainWindow(QMainWindow):
             + ", ".join(f"{p:.1f}" for p in positions))
         self.btn_propagate.setEnabled(True)
 
-        self.tbl_detected.setRowCount(0)
-        for pos in positions:
-            row = self.tbl_detected.rowCount()
-            self.tbl_detected.insertRow(row)
-            self.tbl_detected.setItem(row, 0, QTableWidgetItem(f"{pos:.2f}"))
-            self.tbl_detected.setItem(row, 1, QTableWidgetItem("—  (double-click to assign)"))
-            self.tbl_detected.setItem(row, 2, QTableWidgetItem(""))
-
+        self._refresh_detected_table(ch_id)
         self.spectrum_canvas.plot_spectrum(
             sp.bin_centers, sp.counts,
             title=f"Channel {ch_id} — {sp.n_entries} entries")
@@ -1189,6 +1196,15 @@ class MainWindow(QMainWindow):
             self._open_assign_dialog(float(adc_item.text()))
 
     def _open_assign_dialog(self, adc_pos: float):
+        """
+        Assign a known energy to a detected peak position.
+
+        - If adc_pos == 0 and energy == 0: zero-point, added directly to ALL
+          channels' calibration points (no TSpectrum search needed).
+        - Otherwise: saved on the current channel and stored as _last_assigned
+          so the user can then click "Detect in All → <energy>" to find the
+          same peak in every channel and add it to their calib points.
+        """
         dlg = AssignEnergyDialog(adc_pos, self)
         if dlg.exec_() != QDialog.Accepted:
             return
@@ -1197,15 +1213,76 @@ class MainWindow(QMainWindow):
         lbl   = dlg.le_label.text()
         ch_id = self.current_channel
 
-        # Always create a channel-specific override when assigning
-        self.peak_mgr.add_channel_peak(ch_id, adc, eng, lbl)
-        self.chk_override.blockSignals(True)
-        self.chk_override.setChecked(True)
-        self.chk_override.blockSignals(False)
+        all_channels = self.loader.get_channel_ids()
+        zero_point   = (adc == 0.0 and eng == 0.0)
 
+        if zero_point:
+            # Add (0 ADC, 0 keV) to every channel immediately — no search needed
+            for c in all_channels:
+                if not self.peak_mgr.is_excluded(c):
+                    self.peak_mgr.add_channel_peak(c, 0.0, 0.0,
+                                                    lbl or "origin")
+            self._refresh_cal_table(ch_id)
+            self._update_detail_view(ch_id)
+            msg = (f"Zero-point (0 ADC, 0 keV) added to "
+                   f"{len(all_channels)} channel(s).")
+            self.lbl_prop_status.setText(msg)
+            self.lbl_last_assigned.setText("✔ Zero-point added to all channels.")
+            self.statusBar().showMessage(msg)
+            return
+
+        # Save on the current channel
+        self.peak_mgr.add_channel_peak(ch_id, adc, eng, lbl)
+
+        # Remember this assignment so "Detect in All" knows the target
+        self._last_assigned = {"adc": adc, "energy": eng, "label": lbl}
+        self.btn_propagate.setEnabled(True)
+        self.lbl_last_assigned.setText(
+            f"Last assigned: {eng} keV  ({lbl})  at ADC {adc:.1f}  "
+            f"→ click  🔍 Detect → All  to find in every channel")
+
+        self._refresh_detected_table(ch_id)
         self._refresh_cal_table(ch_id)
         self._update_detail_view(ch_id)
-        self.btn_propagate.setEnabled(True)
+
+        msg = f"Assigned {eng} keV ({lbl}) at ADC {adc:.1f} on ch {ch_id}. Click Detect → All to propagate."
+        self.lbl_prop_status.setText(msg)
+        self.statusBar().showMessage(msg)
+
+    def _add_manual_point_all(self):
+        """
+        Open the assign dialog with ADC=0 pre-filled.
+        If the user enters (0, 0) it goes to all channels.
+        If the user enters any other (ADC, energy), it also goes to all
+        channels directly — this is useful for known fixed points like
+        (0 ADC, 0 keV) that are common to every channel.
+        """
+        dlg = AssignEnergyDialog(0.0, self)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        adc = dlg.sb_adc.value()
+        eng = dlg.sb_energy.value()
+        lbl = dlg.le_label.text()
+
+        all_channels = self.loader.get_channel_ids()
+        n_added = 0
+        for c in all_channels:
+            if not self.peak_mgr.is_excluded(c):
+                # Remove any existing point at the same energy (avoid duplicates)
+                if c in self.peak_mgr.channel_peaks:
+                    self.peak_mgr.channel_peaks[c] = [
+                        p for p in self.peak_mgr.channel_peaks[c]
+                        if abs(p.known_energy - eng) > 0.01
+                    ]
+                self.peak_mgr.add_channel_peak(c, adc, eng, lbl)
+                n_added += 1
+
+        ch_id = self.current_channel
+        self._refresh_cal_table(ch_id)
+        self._update_detail_view(ch_id)
+        msg = f"Manual point ({adc:.1f} ADC, {eng} keV, '{lbl}') added to {n_added} channel(s)."
+        self.lbl_prop_status.setText(msg)
+        self.statusBar().showMessage(msg)
 
     def _on_peak_click(self, x: float):
         self._open_assign_dialog(x)
@@ -1222,32 +1299,70 @@ class MainWindow(QMainWindow):
         ch_id = self.current_channel
         if row < 0 or ch_id < 0:
             return
-        if self.peak_mgr.has_override(ch_id):
-            self.peak_mgr.remove_channel_peak(ch_id, row)
-        else:
-            self.peak_mgr.remove_global_peak(row)
+        self.peak_mgr.remove_channel_peak(ch_id, row)
         self._refresh_cal_table(ch_id)
         self._update_detail_view(ch_id)
 
     def _reset_to_global(self):
+        """Remove this channel's specific peak assignments (keeps detected positions)."""
         ch_id = self.current_channel
         if ch_id < 0:
             return
-        self.peak_mgr.reset_channel_to_global(ch_id)
-        self.chk_override.blockSignals(True)
-        self.chk_override.setChecked(False)
-        self.chk_override.blockSignals(False)
+        self.peak_mgr.reset_channel(ch_id)
         self._refresh_cal_table(ch_id)
         self._update_detail_view(ch_id)
 
-    def _on_override_toggled(self, checked: bool):
+    def _on_exclude_toggled(self, checked: bool):
+        """Mark/unmark this channel as excluded from energy propagation."""
         ch_id = self.current_channel
         if ch_id < 0:
             return
-        if not checked:
-            self.peak_mgr.reset_channel_to_global(ch_id)
-        self._refresh_cal_table(ch_id)
-        self._update_detail_view(ch_id)
+        self.peak_mgr.set_excluded(ch_id, checked)
+        status = "excluded from" if checked else "included in"
+        self.statusBar().showMessage(
+            f"Channel {ch_id} is now {status} energy propagation.")
+
+    def _refresh_detected_table(self, ch_id: int):
+        """
+        Refresh the detected peaks table for ch_id.
+        Shows all raw detected positions; if an energy has been assigned
+        to that position (via channel_peaks), show it inline.
+        """
+        detected = self.peak_mgr.get_detected(ch_id)
+        assigned = self.peak_mgr.get_peaks(ch_id)   # energy-labelled peaks
+
+        # Build a quick lookup: adc -> Peak for assigned peaks
+        tol = 5.0  # ADC tolerance to match detected → assigned
+        def find_assigned(adc):
+            best = None
+            best_d = tol
+            for p in assigned:
+                d = abs(p.adc_position - adc)
+                if d < best_d:
+                    best_d = d
+                    best = p
+            return best
+
+        self.tbl_detected.setRowCount(0)
+        for pos in detected:
+            row = self.tbl_detected.rowCount()
+            self.tbl_detected.insertRow(row)
+            self.tbl_detected.setItem(row, 0, QTableWidgetItem(f"{pos:.2f}"))
+            pk = find_assigned(pos)
+            if pk:
+                self.tbl_detected.setItem(row, 1,
+                    QTableWidgetItem(f"{pk.known_energy:.2f} keV"))
+                self.tbl_detected.setItem(row, 2,
+                    QTableWidgetItem(pk.label))
+                # Colour the row green to show it's assigned
+                for col in range(3):
+                    item = self.tbl_detected.item(row, col)
+                    if item:
+                        item.setBackground(QColor(180, 230, 180))
+            else:
+                self.tbl_detected.setItem(row, 1,
+                    QTableWidgetItem("—  (double-click to assign)"))
+                self.tbl_detected.setItem(row, 2, QTableWidgetItem(""))
 
     def _refresh_cal_table(self, ch_id: int):
         peaks = self.peak_mgr.get_peaks(ch_id)
@@ -1260,101 +1375,130 @@ class MainWindow(QMainWindow):
             self.tbl_cal.setItem(row, 2, QTableWidgetItem(p.label))
 
     # ------------------------------------------------------------------ #
-    # Propagate peaks — FIXED
+    # Detect peaks in ALL channels for the last assigned energy
     # ------------------------------------------------------------------ #
 
-    def _propagate_peaks(self):
+    def _detect_peaks_all_channels(self):
         """
-        For each peak assigned on the reference channel, search all other
-        channels within ± window ADC counts for a matching peak.
+        For the peak most recently assigned on the current channel
+        (stored in self._last_assigned), run TSpectrum inside a
+        ± window around that ADC position on every other channel,
+        find the best local maximum, and add (ADC_ch, energy, label)
+        directly to each channel's calibration points.
 
-        FIX: was requiring all reference peaks to be found before saving.
-        Now always saves what was found (even partial matches).
-        FIX: window default increased to 50 (from 10) which was too narrow.
+        This accumulates — calling it again for a different peak (1275 keV)
+        appends to existing calibration points without removing the 511 keV
+        entry already there.
+
+        Channels flagged as excluded are skipped.
         """
-        ref_ch   = self.current_channel
-        window   = self.sb_prop_window.value()
-        source   = self.cb_prop_source.currentData()
-        override = self.chk_prop_override.isChecked()
-
-        # Gather reference peaks
-        if source == "current":
-            ref_peaks = self.peak_mgr.get_peaks(ref_ch)
-        else:
-            ref_peaks = self.peak_mgr.global_peaks
-
-        if not ref_peaks:
-            QMessageBox.warning(self, "No Reference Peaks",
-                "Assign at least one peak on the current channel first.\n\n"
-                "Steps:\n"
-                "1. Detect peaks with 🔍 Detect Peaks\n"
-                "2. Double-click peaks in the table to assign energies\n"
-                "3. Then click Propagate")
+        if not self._last_assigned:
+            QMessageBox.information(self, "No Peak Assigned",
+                "Detect a peak on the current channel and assign its energy "
+                "first, then click this button.")
             return
+
+        ref_adc  = self._last_assigned["adc"]
+        energy   = self._last_assigned["energy"]
+        label    = self._last_assigned["label"]
+        window   = self.sb_prop_window.value()
 
         all_channels = self.loader.get_channel_ids()
-        target_chs   = [ch for ch in all_channels if ch != ref_ch]
+        src_ch       = self.current_channel
 
-        if not target_chs:
-            QMessageBox.information(self, "Single Channel",
-                "Only one channel loaded — nothing to propagate to.")
-            return
+        threshold    = self.sl_threshold.value() / 100.0
+        sigma        = self.sb_sigma.value()
+        max_peaks    = self.sb_max_peaks.value()
+        pedestal_cut = float(self.sb_pedestal.value())
+        backend      = self.loader.backend
 
-        backend = self.loader.backend
-        sigma   = self.sb_sigma.value()
-        thresh  = self.sl_threshold.value() / 100.0
-        ped_cut = float(self.sb_pedestal.value())
+        n_ok     = 0
+        n_excl   = 0
+        n_failed = 0
+        n_total  = len([c for c in all_channels if c != src_ch])
 
-        n_found_total = 0
-        n_partial     = 0
-        n_failed      = 0
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, max(n_total, 1))
 
-        for ch_id in target_chs:
+        for i, ch_id in enumerate(all_channels):
+            if ch_id == src_ch:
+                continue
+            self.progress_bar.setValue(i + 1)
+            QApplication.processEvents()
+
+            if self.peak_mgr.is_excluded(ch_id):
+                n_excl += 1
+                continue
+
             sp = self.loader.get_spectrum(ch_id)
             if sp is None:
                 n_failed += 1
                 continue
 
-            new_peaks = PeakManager.find_peaks_in_windows(
-                bin_centers     = sp.bin_centers,
-                counts          = sp.counts,
-                reference_peaks = ref_peaks,
-                window          = window,
-                sigma           = sigma,
-                threshold       = thresh,
-                backend         = backend,
-                pedestal_cut    = ped_cut)
+            # Slice spectrum to search window
+            lo   = ref_adc - window
+            hi   = ref_adc + window
+            mask = (sp.bin_centers >= lo) & (sp.bin_centers <= hi)
 
-            if not new_peaks:
+            if mask.sum() < 3:
+                # Window outside this channel's ADC range — skip
                 n_failed += 1
                 continue
 
-            # Always save the found peaks — even partial matches
-            # find_peaks_in_windows guarantees one result per ref peak
-            if override:
-                self.peak_mgr.set_channel_peaks(ch_id, new_peaks)
+            win_centers = sp.bin_centers[mask]
+            win_counts  = sp.counts[mask]
+
+            # Run TSpectrum / scipy inside the window
+            candidates = PeakManager.detect_peaks(
+                win_centers, win_counts,
+                sigma        = sigma,
+                threshold    = threshold,
+                max_peaks    = max_peaks,
+                backend      = backend,
+                pedestal_cut = 0.0)   # window already above pedestal
+
+            if candidates:
+                # Take the candidate closest to the reference ADC
+                best_adc = min(candidates, key=lambda x: abs(x - ref_adc))
             else:
-                # Without override: only apply if we got ALL reference peaks
-                if len(new_peaks) == len(ref_peaks):
-                    self.peak_mgr.set_channel_peaks(ch_id, new_peaks)
-                else:
-                    n_partial += 1
-                    continue
+                # Fallback: centroid of the smoothed local maximum
+                from scipy.ndimage import gaussian_filter1d
+                smooth   = gaussian_filter1d(win_counts.astype(float),
+                                             sigma=max(1, sigma))
+                idx_max  = int(np.argmax(smooth))
+                hw       = max(2, int(len(smooth) * 0.1))
+                lo_i     = max(0, idx_max - hw)
+                hi_i     = min(len(smooth), idx_max + hw + 1)
+                wslice   = smooth[lo_i:hi_i]
+                cslice   = win_centers[lo_i:hi_i]
+                best_adc = (float(np.sum(cslice * wslice) / wslice.sum())
+                            if wslice.sum() > 0 else ref_adc)
 
-            n_found_total += 1
+            # Add directly to this channel's calibration points (cumulative)
+            # Remove duplicate at same energy first to allow re-running
+            if ch_id in self.peak_mgr.channel_peaks:
+                tol = window * 0.5
+                self.peak_mgr.channel_peaks[ch_id] = [
+                    p for p in self.peak_mgr.channel_peaks[ch_id]
+                    if abs(p.known_energy - energy) > 0.01
+                ]
+            self.peak_mgr.add_channel_peak(ch_id, best_adc, energy, label)
+            n_ok += 1
 
-        # Refresh current view
-        self._update_detail_view(ref_ch)
+        self.progress_bar.setVisible(False)
+        self._update_detail_view(src_ch)
 
-        msg = (f"Propagated {len(ref_peaks)} peak(s) to "
-               f"{n_found_total}/{len(target_chs)} channel(s).")
-        if n_partial > 0:
-            msg += f"  ({n_partial} partial — enable 'overrides' to include.)"
-        if n_failed > 0:
-            msg += f"  ({n_failed} had no spectrum.)"
+        msg = (f"Added {energy} keV ({label}) to calib points of "
+               f"{n_ok}/{n_total} channel(s).")
+        if n_excl:
+            msg += f"  ({n_excl} excluded)"
+        if n_failed:
+            msg += f"  ({n_failed} had no spectrum in window)"
         self.lbl_prop_status.setText(msg)
+        self.lbl_last_assigned.setText(
+            f"✔ {energy} keV ({label}) added to {n_ok} channel(s). "
+            f"Now detect the next peak and assign its energy.")
         self.statusBar().showMessage(msg)
-
     # ------------------------------------------------------------------ #
     # Fitting
     # ------------------------------------------------------------------ #

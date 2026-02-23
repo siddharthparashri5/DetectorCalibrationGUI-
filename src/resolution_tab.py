@@ -25,7 +25,9 @@ from matplotlib.widgets import SpanSelector
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 
-from src.resolution import ResolutionCalculator, gaussian_linear_bg, gaussian_only
+from src.resolution import (ResolutionCalculator, BG_MODELS,
+                             gaussian_linear_bg, gaussian_quadratic_bg,
+                             gaussian_exp_bg, gaussian_step_bg, gaussian_only)
 from src.calib_spectrum import CalibratedSpectrum
 
 
@@ -68,10 +70,16 @@ class ResolutionTab(QWidget):
 
         fit_box = QGroupBox("Fit Options")
         fit_l   = QHBoxLayout(fit_box)
-        fit_l.addWidget(QLabel("Background:"))
+        fit_l.addWidget(QLabel("Background model:"))
         self.cb_bg = QComboBox()
-        self.cb_bg.addItem("Gaussian + linear BG", True)
-        self.cb_bg.addItem("Gaussian only",         False)
+        self.cb_bg.setMinimumWidth(220)
+        self.cb_bg.addItem("Compton step  (B·erfc) — recommended", "step")
+        self.cb_bg.addItem("Exponential  (B·exp(C·E))",             "exponential")
+        self.cb_bg.addItem("Quadratic  (B + C·E + D·E²)",           "quadratic")
+        self.cb_bg.addItem("Linear  (B + C·E)",                     "linear")
+        self.cb_bg.addItem("Gaussian only  (no background)",        "none")
+        self.cb_bg.addItem("Auto  (lowest χ²/NDF)",                  "auto")
+        self.cb_bg.setCurrentIndex(0)  # default: step
         fit_l.addWidget(self.cb_bg)
         fit_l.addWidget(QLabel("Peak label (keV):"))
         self.sb_peak_label = QDoubleSpinBox()
@@ -118,10 +126,10 @@ class ResolutionTab(QWidget):
 
         tbl_widget = QWidget()
         tbl_l      = QVBoxLayout(tbl_widget)
-        self.tbl_results = QTableWidget(0, 7)
+        self.tbl_results = QTableWidget(0, 8)
         self.tbl_results.setHorizontalHeaderLabels([
             "Channel", "Peak (keV)", "Centroid (keV)",
-            "FWHM (keV)", "R%", "χ²/NDF", "Status"])
+            "FWHM (keV)", "R%", "χ²/NDF", "BG model", "Status"])
         self.tbl_results.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.tbl_results.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.tbl_results.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -217,40 +225,58 @@ class ResolutionTab(QWidget):
         cal    = self._current_cal
         use_bg = self.cb_bg.currentData()
         label  = self.sb_peak_label.value()
+        bg_model = self.cb_bg.currentData()
         result = self.calc.fit_peak(
             channel_id=cal.channel_id, peak_label=label,
             energy_arr=cal.energy_centers, counts_arr=cal.counts,
-            e_lo=self._span_lo, e_hi=self._span_hi, use_bg=use_bg)
+            e_lo=self._span_lo, e_hi=self._span_hi, bg_model=bg_model)
         self._add_result_row(result)
         if result.success:
-            self._overlay_fit(cal, result, use_bg)
+            self._overlay_fit(cal, result, bg_model)
             self._update_trend_combo()
             self._update_trend()
             self.btn_export.setEnabled(True)
         else:
             QMessageBox.warning(self, "Fit Failed", result.fail_reason)
 
-    def _overlay_fit(self, cal, result, use_bg: bool):
+    def _overlay_fit(self, cal, result, bg_model: str):
+        """Draw the full fitted curve (signal + background) on the spectrum."""
+        from src.resolution import BG_MODELS, gaussian_only
         e_lo, e_hi = result.fit_range
-        E_fine     = np.linspace(e_lo, e_hi, 400)
-        if use_bg:
-            mask  = (cal.energy_centers >= e_lo) & (cal.energy_centers <= e_hi)
-            C_bg  = cal.counts[mask]
-            B     = float(C_bg.min()) if len(C_bg) > 0 else 0.0
-            Y     = gaussian_linear_bg(E_fine, result.amplitude,
-                                        result.mu, result.sigma, B, 0.0)
+        E_fine     = np.linspace(e_lo, e_hi, 500)
+
+        # Reconstruct full fit using stored params
+        model_key = result.bg_model  # use what was actually fitted
+        if model_key in BG_MODELS and model_key != "none":
+            func    = BG_MODELS[model_key]["func"]
+            params  = [result.amplitude, result.mu, result.sigma] + list(result.bg_params)
+            try:
+                Y_full = func(E_fine, *params)
+                # Also draw the pure Gaussian part separately
+                Y_gauss = gaussian_only(E_fine, result.amplitude,
+                                         result.mu, result.sigma)
+                self.ax_spec.fill_between(E_fine, Y_gauss, alpha=0.15,
+                                           color="#c62828", label="_nolegend_")
+            except Exception:
+                Y_full = gaussian_only(E_fine, result.amplitude,
+                                        result.mu, result.sigma)
         else:
-            Y = gaussian_only(E_fine, result.amplitude, result.mu, result.sigma)
+            Y_full = gaussian_only(E_fine, result.amplitude,
+                                    result.mu, result.sigma)
+
+        bg_lbl = BG_MODELS.get(model_key, {}).get("label", model_key)
         line, = self.ax_spec.plot(
-            E_fine, Y, "-", color="#c62828", linewidth=1.5,
-            label=f"Fit {result.peak_energy:.0f} keV  "
-                  f"FWHM={result.fwhm:.2f} keV  R={result.resolution:.1f}%",
+            E_fine, Y_full, "-", color="#c62828", linewidth=1.8,
+            label=(f"{result.peak_energy:.0f} keV  "
+                   f"FWHM={result.fwhm:.2f} keV  R={result.resolution:.1f}%  "
+                   f"[{model_key}]  chi2/NDF={result.chi2_ndf:.2f}"),
             zorder=5)
+
         fwhm_y = result.amplitude * 0.5
         self.ax_spec.annotate(
-            f"FWHM={result.fwhm:.2f} keV\nR={result.resolution:.1f}%",
+            f"FWHM={result.fwhm:.2f} keV\nR={result.resolution:.1f}%\n[{model_key}]",
             xy=(result.mu, fwhm_y),
-            xytext=(result.mu + (e_hi - e_lo)*0.1, fwhm_y * 1.5),
+            xytext=(result.mu + (e_hi - e_lo) * 0.08, fwhm_y * 1.8),
             fontsize=7, color="#c62828",
             arrowprops=dict(arrowstyle="->", color="#c62828", lw=0.8))
         self.ax_spec.legend(fontsize=7)
@@ -270,14 +296,14 @@ class ResolutionTab(QWidget):
             QMessageBox.warning(self, "No Calibrated Spectra",
                 "Apply calibration to all channels first ('▶ Apply to All').")
             return
-        use_bg = self.cb_bg.currentData()
-        label  = self.sb_peak_label.value()
-        n_ok   = 0
+        bg_model = self.cb_bg.currentData()
+        label    = self.sb_peak_label.value()
+        n_ok     = 0
         for ch_id, cal in sorted(all_cals.items()):
             result = self.calc.fit_peak(
                 channel_id=ch_id, peak_label=label,
                 energy_arr=cal.energy_centers, counts_arr=cal.counts,
-                e_lo=self._span_lo, e_hi=self._span_hi, use_bg=use_bg)
+                e_lo=self._span_lo, e_hi=self._span_hi, bg_model=bg_model)
             self._add_result_row(result)
             if result.success:
                 n_ok += 1
@@ -315,13 +341,14 @@ class ResolutionTab(QWidget):
             self.tbl_results.setItem(row, 3, cell(f"{r.fwhm:.3f} ± {r.fwhm_err:.3f}"))
             self.tbl_results.setItem(row, 4, cell(f"{r.resolution:.2f} ± {r.resolution_err:.2f}"))
             self.tbl_results.setItem(row, 5, cell(f"{r.chi2_ndf:.3f}"))
-            self.tbl_results.setItem(row, 6, cell("✅ OK", "#E8F5E9"))
+            self.tbl_results.setItem(row, 6, cell(r.bg_model))
+            self.tbl_results.setItem(row, 7, cell("✅ OK", "#E8F5E9"))
         else:
             self.tbl_results.setItem(row, 0, cell(r.channel_id))
             self.tbl_results.setItem(row, 1, cell(f"{r.peak_energy:.1f}"))
-            for col in range(2, 6):
+            for col in range(2, 7):
                 self.tbl_results.setItem(row, col, cell("—"))
-            self.tbl_results.setItem(row, 6, cell(f"❌ {r.fail_reason[:30]}", "#FFEBEE"))
+            self.tbl_results.setItem(row, 7, cell(f"❌ {r.fail_reason[:30]}", "#FFEBEE"))
         self.tbl_results.scrollToBottom()
 
     def _clear_channel_fits(self):
