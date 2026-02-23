@@ -31,6 +31,18 @@ class Peak:
     auto_detected: bool = False
 
 
+# Known internal emission lines for crystal types (energy in keV)
+CRYSTAL_KNOWN_LINES = {
+    "lyso": [
+        {"energy": 88.34,  "label": "Lu-176 88 keV",  "color": "#7b1fa2"},
+        {"energy": 201.83, "label": "Lu-176 202 keV",  "color": "#7b1fa2"},
+        {"energy": 306.78, "label": "Lu-176 307 keV",  "color": "#7b1fa2"},
+    ],
+    "gagg": [],
+    "generic": [],
+}
+
+
 class PeakManager:
     """
     detected_positions : dict[int, list[float]]   — raw ADC positions per channel (no energy)
@@ -200,17 +212,31 @@ class PeakManager:
                                 sigma: float = 2.0,
                                 threshold: float = 0.05,
                                 max_peaks: int = 10,
-                                pedestal_cut: float = 0.0
-                                ) -> list[float]:
+                                pedestal_cut: float = 0.0,
+                                tspec_mode: str = "highres",
+                                iterations: int = 10,
+                                bg_subtract: bool = True,
+                                bg_iterations: int = 20,
+                                ) -> tuple[list[float], np.ndarray | None]:
         """
         Detect peaks using ROOT TSpectrum.
-        pedestal_cut : ignore all ADC bins below this value.
 
-        Ownership fix: SetDirectory(0) detaches the histogram from gDirectory
-        so ROOT never double-deletes it when Python GC runs.  ROOT stderr is
-        suppressed during the call to silence residual TList warnings.
+        Returns (positions, bg_counts) where bg_counts is the estimated
+        SNIP background array (same length as counts after pedestal cut),
+        or None if bg_subtract is False or ROOT unavailable.
+
+        bg_subtract    : run TSpectrum::Background() (SNIP) first to
+                         estimate and remove the continuum before searching.
+                         Critical for LYSO where the Lu-176 beta continuum
+                         causes many false peaks if left unsubtracted.
+        bg_iterations  : SNIP smoothing width — larger = broader background
+                         estimate. Try 20–40 for LYSO.
+
+        tspec_mode == "standard"  : TSpectrum::Search()
+        tspec_mode == "highres"   : TSpectrum::SearchHighRes() — deconvolution,
+                                    resolves closely-spaced peaks.
         """
-        import sys, os
+        import os, array as arr
         try:
             import ROOT
 
@@ -220,59 +246,91 @@ class PeakManager:
                 counts      = counts[mask]
 
             if len(counts) == 0:
-                return []
+                return [], None
 
-            n = len(counts)
+            n         = len(counts)
+            counts_f  = counts.astype(float)
 
-            # Suppress ROOT stderr noise (TList::Clear warnings) ──────────
-            devnull_fd  = os.open(os.devnull, os.O_WRONLY)
+            # ── Suppress ROOT stderr ──────────────────────────────────────
+            devnull_fd   = os.open(os.devnull, os.O_WRONLY)
             saved_stderr = os.dup(2)
             os.dup2(devnull_fd, 2)
             os.close(devnull_fd)
 
+            bg_array = None   # will hold estimated background
+
             try:
-                # Use a unique name to avoid gDirectory collisions
                 import threading
                 hname = f"_tspec_{threading.get_ident()}_{id(bin_centers)}"
                 h = ROOT.TH1F(hname, "", n,
                                float(bin_centers[0]),
                                float(bin_centers[-1]))
-                # Detach from gDirectory immediately — Python owns this object
                 h.SetDirectory(ROOT.nullptr)
                 ROOT.SetOwnership(h, True)
+                for i, c in enumerate(counts_f):
+                    h.SetBinContent(i + 1, c)
 
-                for i, c in enumerate(counts):
-                    h.SetBinContent(i + 1, float(c))
+                sp = ROOT.TSpectrum(max_peaks)
 
-                sp      = ROOT.TSpectrum(max_peaks)
-                n_found = sp.Search(h, sigma, "nobackground nodraw", threshold)
+                # ── SNIP background estimate ──────────────────────────────
+                if bg_subtract:
+                    hbg = sp.Background(h, int(bg_iterations),
+                                        "BackDecreasing BackSmoothing3")
+                    ROOT.SetOwnership(hbg, True)
+                    bg_array = np.array([hbg.GetBinContent(i + 1)
+                                         for i in range(n)], dtype=float)
+                    # Subtract from working array for peak search
+                    counts_sub = np.maximum(counts_f - bg_array, 0.0)
+                    # Reload histogram with subtracted counts
+                    for i, c in enumerate(counts_sub):
+                        h.SetBinContent(i + 1, c)
+                    try:
+                        hbg.Delete(); del hbg
+                    except Exception:
+                        pass
+                else:
+                    counts_sub = counts_f
 
-                positions = []
-                px = sp.GetPositionX()
-                for i in range(n_found):
-                    positions.append(float(px[i]))
+                # ── Peak search ───────────────────────────────────────────
+                if tspec_mode == "highres":
+                    src_arr  = arr.array("d", [float(c) for c in counts_sub])
+                    dest_arr = arr.array("d", [0.0] * n)
+                    n_found  = sp.SearchHighRes(
+                        src_arr, dest_arr, n,
+                        float(sigma), float(threshold),
+                        False,            # backgroundRemove — already done
+                        int(iterations),
+                        False, 3)
+                    positions = []
+                    px = sp.GetPositionX()
+                    for i in range(n_found):
+                        bin_idx = max(0, min(n - 1, int(round(float(px[i])))))
+                        positions.append(float(bin_centers[bin_idx]))
+                else:
+                    n_found = sp.Search(h, sigma, "nobackground nodraw", threshold)
+                    positions = []
+                    px = sp.GetPositionX()
+                    for i in range(n_found):
+                        positions.append(float(px[i]))
 
-                # Copy results before deleting
                 result = sorted(positions)
 
             finally:
-                # Restore stderr
                 os.dup2(saved_stderr, 2)
                 os.close(saved_stderr)
-                # Explicitly delete ROOT objects to avoid TList race
                 try:
                     del sp
-                    h.Delete()
-                    del h
+                    h.Delete(); del h
                 except Exception:
                     pass
 
-            return result
+            return result, bg_array
 
         except Exception:
-            return PeakManager.detect_peaks_scipy(
+            positions = PeakManager.detect_peaks_scipy(
                 bin_centers, counts, sigma, threshold, max_peaks,
                 pedestal_cut=0.0)
+            return positions, None
 
     # ------------------------------------------------------------------ #
     # Peak detection — scipy fallback
@@ -334,14 +392,22 @@ class PeakManager:
                       threshold: float = 0.05,
                       max_peaks: int = 10,
                       backend: str = "pyroot",
-                      pedestal_cut: float = 0.0
-                      ) -> list[float]:
-        """Dispatch to TSpectrum or scipy depending on active backend."""
+                      pedestal_cut: float = 0.0,
+                      tspec_mode: str = "highres",
+                      iterations: int = 10,
+                      bg_subtract: bool = True,
+                      bg_iterations: int = 20,
+                      ) -> tuple[list[float], np.ndarray | None]:
+        """Dispatch to TSpectrum (standard or HighRes) or scipy.
+        Returns (positions, bg_array) — bg_array is None for scipy."""
         if backend == "pyroot":
             return PeakManager.detect_peaks_tspectrum(
                 bin_centers, counts, sigma, threshold, max_peaks,
-                pedestal_cut=pedestal_cut)
+                pedestal_cut=pedestal_cut,
+                tspec_mode=tspec_mode, iterations=iterations,
+                bg_subtract=bg_subtract, bg_iterations=bg_iterations)
         else:
-            return PeakManager.detect_peaks_scipy(
+            positions = PeakManager.detect_peaks_scipy(
                 bin_centers, counts, sigma, threshold, max_peaks,
                 pedestal_cut=pedestal_cut)
+            return positions, None

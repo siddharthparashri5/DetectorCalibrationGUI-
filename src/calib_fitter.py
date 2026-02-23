@@ -99,19 +99,29 @@ class FitResult:
     bad_channel:   bool = False
     bad_reason:    str  = ""
     note:          str  = ""
+    adc_max:       float = field(default=np.inf)   # last assigned peak ADC — hard limit for extrapolation
 
     def energy_at(self, Q):
-        """Evaluate the calibration model at ADC value(s) Q."""
-        Q = np.asarray(Q, dtype=float)
+        """Evaluate the calibration model at ADC value(s) Q.
+        Returns NaN for any Q > adc_max (last assigned peak) to prevent
+        extrapolation beyond the calibrated range."""
+        Q    = np.asarray(Q, dtype=float)
+        mask = Q <= self.adc_max   # within calibrated range
+
         if self.model == "linear":
-            return model_linear(Q, *self.params)
+            result = model_linear(Q, *self.params)
         elif self.model == "nonlinear":
-            return model_nonlinear(Q, *self.params)
+            result = model_nonlinear(Q, *self.params)
         elif self.model == "nonlinear_3pt":
-            return model_nonlinear_3pt(Q, *self.params)
+            result = model_nonlinear_3pt(Q, *self.params)
         elif self.model == "custom" and hasattr(self, "_custom_func"):
-            return self._custom_func(Q, *self.params)
-        return np.full_like(Q, np.nan)
+            result = self._custom_func(Q, *self.params)
+        else:
+            return np.full_like(Q, np.nan)
+
+        # Blank out values beyond the last calibration point
+        result = np.where(mask, result, np.nan)
+        return result
 
     def __str__(self):
         lines = [f"Channel {self.channel_id} | {self.model_label}"]
@@ -230,7 +240,8 @@ class CalibrationFitter:
             chi2=chi2, ndf=ndf, chi2_ndf=chi2_ndf,
             adc_points=adc_points, energy_points=energy_points,
             residuals=residuals,
-            success=True, bad_channel=bad, bad_reason=reason, note=note
+            success=True, bad_channel=bad, bad_reason=reason, note=note,
+            adc_max=float(adc_points.max()),   # hard limit: last assigned peak
         )
 
         if model == "custom" and custom_f is not None:

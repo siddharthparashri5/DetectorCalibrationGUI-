@@ -29,7 +29,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 
 from src.root_loader import ROOTFileLoader
-from src.peak_manager import PeakManager, Peak
+from src.peak_manager import PeakManager, Peak, CRYSTAL_KNOWN_LINES
 from src.calib_fitter import CalibrationFitter, MODELS
 from src.output_writer import OutputWriter
 from src.calib_spectrum_tab import CalibratedSpectrumTab
@@ -66,6 +66,79 @@ class FitWorker(QThread):
 
 
 # ======================================================================== #
+# Collapsible box widget
+# ======================================================================== #
+
+class CollapsibleBox(QWidget):
+    """A titled panel that can be toggled open/closed by clicking the header."""
+
+    def __init__(self, title: str, parent=None, collapsed: bool = False):
+        super().__init__(parent)
+        self._collapsed = collapsed
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        # ── Header button ────────────────────────────────────────────── #
+        self._btn = QPushButton()
+        self._btn.setCheckable(True)
+        self._btn.setChecked(not collapsed)
+        self._btn.clicked.connect(self._toggle)
+        self._btn.setStyleSheet(
+            "QPushButton {"
+            "  text-align: left; padding: 4px 8px;"
+            "  background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            "              stop:0 #e3f2fd, stop:1 #bbdefb);"
+            "  border: 1px solid #90caf9; border-radius: 4px;"
+            "  font-weight: bold; font-size: 11px; color: #0d47a1;"
+            "}"
+            "QPushButton:checked {"
+            "  background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            "              stop:0 #1565c0, stop:1 #1976d2);"
+            "  color: white; border-color: #0d47a1;"
+            "}"
+        )
+        self._title = title
+        self._update_btn_text()
+        outer.addWidget(self._btn)
+
+        # ── Content area ─────────────────────────────────────────────── #
+        self._content = QWidget()
+        self._content.setObjectName("collapsibleContent")
+        self._content.setStyleSheet(
+            "#collapsibleContent {"
+            "  border: 1px solid #90caf9; border-top: none;"
+            "  border-radius: 0 0 4px 4px;"
+            "  background: #fafafa;"
+            "  padding: 2px;"
+            "}")
+        self._content_layout = QVBoxLayout(self._content)
+        self._content_layout.setContentsMargins(6, 4, 6, 6)
+        self._content_layout.setSpacing(4)
+        self._content.setVisible(not collapsed)
+        outer.addWidget(self._content)
+
+    def _toggle(self, checked: bool):
+        self._collapsed = not checked
+        self._content.setVisible(checked)
+        self._update_btn_text()
+
+    def _update_btn_text(self):
+        arrow = "▼" if not self._collapsed else "▶"
+        self._btn.setText(f"  {arrow}  {self._title}")
+
+    def layout(self):   # noqa — return inner layout for addLayout calls
+        return self._content_layout
+
+    def addWidget(self, widget):
+        self._content_layout.addWidget(widget)
+
+    def addLayout(self, layout):
+        self._content_layout.addLayout(layout)
+
+
+# ======================================================================== #
 # Spectrum Canvas
 # ======================================================================== #
 
@@ -78,8 +151,10 @@ class SpectrumCanvas(FigureCanvas):
         super().__init__(self.fig)
         self.setParent(parent)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self._peak_markers = []
-        self._click_mode   = False
+        self._peak_markers    = []
+        self._click_mode      = False
+        self._threshold_line  = None   # horizontal threshold indicator
+        self._current_max_cts = None   # max counts of currently plotted spectrum
         self.mpl_connect("button_press_event", self._on_click)
 
     def set_click_mode(self, enabled: bool):
@@ -93,6 +168,8 @@ class SpectrumCanvas(FigureCanvas):
     def plot_spectrum(self, bin_centers, counts, title=""):
         self.ax.clear()
         self._peak_markers.clear()
+        self._threshold_line  = None
+        self._current_max_cts = float(counts.max()) if len(counts) else None
         self.ax.step(bin_centers, counts, where="mid",
                       color="#1565c0", linewidth=0.8)
         self.ax.set_xlabel("ADC Value", fontsize=9)
@@ -101,6 +178,35 @@ class SpectrumCanvas(FigureCanvas):
         self.ax.set_yscale("log")
         self.ax.set_ylim(bottom=0.5)
         self.ax.grid(True, alpha=0.25, linestyle="--")
+        self.fig.tight_layout(pad=1.5)
+        self.draw()
+
+    def update_threshold_line(self, threshold: float):
+        """Draw/update a horizontal dashed line at threshold × max_counts.
+        This is exactly what TSpectrum uses as the minimum peak height."""
+        if self._current_max_cts is None:
+            return
+        level = threshold * self._current_max_cts
+        if level < 0.5:
+            level = 0.5
+        # Remove previous line
+        if self._threshold_line is not None:
+            try:
+                self._threshold_line.remove()
+            except Exception:
+                pass
+            self._threshold_line = None
+        self._threshold_line = self.ax.axhline(
+            level, color="#e53935", linestyle="--", linewidth=1.2,
+            alpha=0.85, zorder=6,
+            label=f"TSpectrum threshold  ({threshold:.0%} × max = {level:.0f} cts)")
+        # Update or add legend entry
+        handles, labels = self.ax.get_legend_handles_labels()
+        # Remove duplicates
+        seen = {}
+        for h, l in zip(handles, labels):
+            seen[l] = h
+        self.ax.legend(seen.values(), seen.keys(), fontsize=7, loc="upper right")
         self.fig.tight_layout(pad=1.5)
         self.draw()
 
@@ -131,6 +237,54 @@ class SpectrumCanvas(FigureCanvas):
             self._peak_markers.append(line)
         self.draw()
 
+    def draw_background(self, bin_centers, bg_counts):
+        """Overlay the estimated SNIP background on the spectrum."""
+        if bg_counts is None or len(bg_counts) == 0:
+            return
+        self.ax.fill_between(bin_centers, bg_counts,
+                              alpha=0.18, color="#f57c00",
+                              label="SNIP background estimate")
+        self.ax.step(bin_centers, bg_counts, where="mid",
+                      color="#f57c00", linewidth=0.7, alpha=0.6)
+        handles, labels = self.ax.get_legend_handles_labels()
+        seen = {}
+        for h, l in zip(handles, labels):
+            seen[l] = h
+        self.ax.legend(seen.values(), seen.keys(), fontsize=7, loc="upper right")
+        self.fig.tight_layout(pad=1.5)
+        self.draw()
+
+    def draw_known_lines_adc(self, known_lines: list, fit_result):
+        """Draw known crystal emission lines in ADC space using the
+        calibration fit to convert keV → ADC (inverted numerically)."""
+        if not known_lines or fit_result is None or not fit_result.success:
+            return
+        from scipy.optimize import brentq
+        ymax = self.ax.get_ylim()[1]
+        ymin = self.ax.get_ylim()[0]
+        for line_info in known_lines:
+            energy = line_info["energy"]
+            color  = line_info.get("color", "#7b1fa2")
+            label  = line_info["label"]
+            # Invert calibration: find ADC where energy_at(ADC) = energy
+            try:
+                # Search over a wide ADC range
+                adc_lo, adc_hi = 0.0, 1e6
+                f_lo = fit_result.energy_at(adc_lo) - energy
+                f_hi = fit_result.energy_at(adc_hi) - energy
+                if f_lo * f_hi > 0:
+                    continue   # energy outside calibration range
+                adc_pos = brentq(lambda q: fit_result.energy_at(q) - energy,
+                                  adc_lo, adc_hi, xtol=0.1, maxiter=100)
+            except Exception:
+                continue
+            self.ax.axvline(adc_pos, color=color, linestyle="-.",
+                             linewidth=1.1, alpha=0.75)
+            self.ax.text(adc_pos, ymax * 0.45, f" {label}",
+                          color=color, fontsize=6, rotation=90, va="top")
+        self.fig.tight_layout(pad=1.5)
+        self.draw()
+
 
 class CalibCurveCanvas(FigureCanvas):
     def __init__(self, parent=None):
@@ -153,7 +307,8 @@ class CalibCurveCanvas(FigureCanvas):
         adc = result.adc_points
         eng = result.energy_points
 
-        x_fit = np.linspace(max(0, adc.min() * 0.8), adc.max() * 1.15, 500)
+        adc_limit = result.adc_max   # last assigned peak — no extrapolation beyond
+        x_fit = np.linspace(max(0, adc.min() * 0.8), adc_limit, 500)
         y_fit = result.energy_at(x_fit)
 
         # Check that energy_at returned valid values
@@ -177,6 +332,14 @@ class CalibCurveCanvas(FigureCanvas):
                               xy=(a, e), xytext=(4, 4),
                               textcoords="offset points",
                               fontsize=7, color="#c62828")
+
+        # Mark the hard limit with a vertical dashed line
+        e_at_limit = result.energy_at(np.array([adc_limit]))[0]
+        if not np.isnan(e_at_limit):
+            self.ax.axvline(adc_limit, color="#e65100", linestyle="--",
+                             linewidth=1.0, alpha=0.7,
+                             label=f"Fit limit  ADC {adc_limit:.0f}"
+                                   f" = {e_at_limit:.1f} keV")
 
         chi2_str = (f"χ²/NDF = {result.chi2_ndf:.4f}"
                     if result.ndf > 0 else "exact fit (NDF=0)")
@@ -639,6 +802,7 @@ class MainWindow(QMainWindow):
         self._detected_positions: list = []
         self._click_mode = False
         self._last_assigned: dict | None = None  # {adc, energy, label}
+        self.channel_crystal: dict = {}    # ch_id -> 'lyso'|'gagg'|'generic'
 
         self._build_ui()
         self._apply_style()
@@ -746,23 +910,79 @@ class MainWindow(QMainWindow):
         self.lbl_ch_info.setWordWrap(True)
         self.lbl_ch_info.setStyleSheet("font-size: 11px; color: #424242;")
         nav_l.addWidget(self.lbl_ch_info)
+
+        # ── Per-channel crystal type tag ──────────────────────────── #
+        cryst_tag_h = QHBoxLayout()
+        cryst_tag_h.addWidget(QLabel("Crystal type:"))
+        self.cb_ch_crystal = QComboBox()
+        self.cb_ch_crystal.addItem("Generic",  "generic")
+        self.cb_ch_crystal.addItem("GAGG",     "gagg")
+        self.cb_ch_crystal.addItem("LYSO",     "lyso")
+        self.cb_ch_crystal.setToolTip(
+            "Tag this channel's crystal type.\n"
+            "LYSO channels can use Lu-176 internal lines (88, 202, 307 keV)\n"
+            "as automatic calibration points.\n"
+            "The dropdown shows LYSO channels in purple.")
+        self.cb_ch_crystal.currentIndexChanged.connect(self._on_ch_crystal_changed)
+        cryst_tag_h.addWidget(self.cb_ch_crystal, stretch=1)
+
+        self.btn_tag_all_lyso = QPushButton("Tag all → LYSO")
+        self.btn_tag_all_lyso.setToolTip("Mark every channel as LYSO.")
+        self.btn_tag_all_lyso.clicked.connect(
+            lambda: self._tag_all_channels("lyso"))
+        self.btn_tag_all_gagg = QPushButton("Tag all → GAGG")
+        self.btn_tag_all_gagg.setToolTip("Mark every channel as GAGG.")
+        self.btn_tag_all_gagg.clicked.connect(
+            lambda: self._tag_all_channels("gagg"))
+        cryst_tag_h.addWidget(self.btn_tag_all_lyso)
+        cryst_tag_h.addWidget(self.btn_tag_all_gagg)
+        nav_l.addLayout(cryst_tag_h)
         layout.addWidget(nav_box)
 
         # ── Peak detection ──────────────────────────────────────────── #
-        det_box = QGroupBox("Peak Detection  (TSpectrum / scipy)")
-        det_l   = QVBoxLayout(det_box)
+        # ── Peak detection (collapsible) ────────────────────────────── #
+        det_box = CollapsibleBox("🔍  Peak Detection  (TSpectrum / scipy)",
+                                  collapsed=False)
 
         thresh_h = QHBoxLayout()
         thresh_h.addWidget(QLabel("Threshold:"))
         self.sl_threshold = QSlider(Qt.Horizontal)
         self.sl_threshold.setRange(1, 50)
         self.sl_threshold.setValue(5)
-        self.lbl_threshold = QLabel("0.05")
-        self.sl_threshold.valueChanged.connect(
-            lambda v: self.lbl_threshold.setText(f"{v/100:.2f}"))
+        self.sl_threshold.setToolTip(
+            "TSpectrum threshold: fraction of the tallest peak height.\n"
+            "A peak is only reported if its height \u2265 threshold \u00d7 max_peak.\n"
+            "Lower = find more (smaller) peaks.\n"
+            "Max 50% — at 100% only the single maximum bin qualifies.")
+        self.lbl_threshold = QLabel("5%  of max")
+        self.lbl_threshold.setMinimumWidth(80)
+        self.sl_threshold.valueChanged.connect(self._on_threshold_changed)
         thresh_h.addWidget(self.sl_threshold, stretch=1)
         thresh_h.addWidget(self.lbl_threshold)
-        det_l.addLayout(thresh_h)
+        det_box.addLayout(thresh_h)
+
+        mode_h = QHBoxLayout()
+        mode_h.addWidget(QLabel("Search mode:"))
+        self.cb_tspec_mode = QComboBox()
+        self.cb_tspec_mode.addItem("Standard  (Search)",               "standard")
+        self.cb_tspec_mode.addItem("High Resolution  (SearchHighRes)", "highres")
+        self.cb_tspec_mode.setCurrentIndex(1)
+        self.cb_tspec_mode.setToolTip(
+            "Standard: fast, good for well-separated peaks.\n"
+            "High Resolution: deconvolution — resolves closely-spaced peaks.")
+        mode_h.addWidget(self.cb_tspec_mode, stretch=1)
+        det_box.addLayout(mode_h)
+
+        iter_h = QHBoxLayout()
+        iter_h.addWidget(QLabel("Iterations (HighRes):"))
+        self.sb_iterations = QSpinBox()
+        self.sb_iterations.setRange(1, 50)
+        self.sb_iterations.setValue(10)
+        self.sb_iterations.setToolTip(
+            "Deconvolution iterations for SearchHighRes.\n"
+            "More = sharper, slower.  Typical: 5\u201320.")
+        iter_h.addWidget(self.sb_iterations)
+        det_box.addLayout(iter_h)
 
         sigma_h = QHBoxLayout()
         sigma_h.addWidget(QLabel("Sigma (bins):"))
@@ -771,7 +991,7 @@ class MainWindow(QMainWindow):
         self.sb_sigma.setSingleStep(0.5)
         self.sb_sigma.setValue(2.0)
         sigma_h.addWidget(self.sb_sigma)
-        det_l.addLayout(sigma_h)
+        det_box.addLayout(sigma_h)
 
         maxpk_h = QHBoxLayout()
         maxpk_h.addWidget(QLabel("Max peaks:"))
@@ -779,9 +999,8 @@ class MainWindow(QMainWindow):
         self.sb_max_peaks.setRange(1, 30)
         self.sb_max_peaks.setValue(10)
         maxpk_h.addWidget(self.sb_max_peaks)
-        det_l.addLayout(maxpk_h)
+        det_box.addLayout(maxpk_h)
 
-        # ── Pedestal cut ──────────────────────────────────────────── #
         ped_h = QHBoxLayout()
         ped_h.addWidget(QLabel("Pedestal cut (ADC):"))
         self.sb_pedestal = QSpinBox()
@@ -790,20 +1009,49 @@ class MainWindow(QMainWindow):
         self.sb_pedestal.setSingleStep(10)
         self.sb_pedestal.setToolTip(
             "Ignore all peaks below this ADC value.\n"
-            "Set above the pedestal peak to avoid false detections.\n"
-            "0 = disabled.")
+            "Set above the pedestal to avoid false detections.  0 = disabled.")
         ped_h.addWidget(self.sb_pedestal)
-        det_l.addLayout(ped_h)
+        det_box.addLayout(ped_h)
 
-        self.btn_detect = QPushButton("🔍  Detect Peaks (Current channel)")
+        bg_h = QHBoxLayout()
+        self.chk_bg_subtract = QCheckBox("Subtract background (SNIP)")
+        self.chk_bg_subtract.setChecked(True)
+        self.chk_bg_subtract.setToolTip(
+            "Use TSpectrum::Background() (SNIP) before peak search.\n"
+            "Removes Lu-176 beta continuum in LYSO spectra.")
+        bg_h.addWidget(self.chk_bg_subtract)
+        self.sb_bg_iterations = QSpinBox()
+        self.sb_bg_iterations.setRange(1, 100)
+        self.sb_bg_iterations.setValue(20)
+        self.sb_bg_iterations.setToolTip(
+            "SNIP iterations.  More = smoother BG.  LYSO: try 20\u201340.")
+        bg_h.addWidget(QLabel("iter:"))
+        bg_h.addWidget(self.sb_bg_iterations)
+        det_box.addLayout(bg_h)
+
+        cryst_h = QHBoxLayout()
+        cryst_h.addWidget(QLabel("Crystal:"))
+        self.cb_crystal = QComboBox()
+        self.cb_crystal.addItem("Generic", "generic")
+        self.cb_crystal.addItem("GAGG",    "gagg")
+        self.cb_crystal.addItem("LYSO",    "lyso")
+        self.cb_crystal.setToolTip(
+            "LYSO: overlays Lu-176 lines (88, 202, 307 keV) after calibration.")
+        cryst_h.addWidget(self.cb_crystal, stretch=1)
+        self.chk_show_known = QCheckBox("Show known lines")
+        self.chk_show_known.setChecked(True)
+        cryst_h.addWidget(self.chk_show_known)
+        det_box.addLayout(cryst_h)
+
+        self.btn_detect = QPushButton("\U0001f50d  Detect Peaks (Current channel)")
         self.btn_detect.setEnabled(False)
         self.btn_detect.clicked.connect(self._detect_peaks)
-        det_l.addWidget(self.btn_detect)
+        det_box.addWidget(self.btn_detect)
 
         self.lbl_detected = QLabel("No peaks detected yet.")
         self.lbl_detected.setWordWrap(True)
         self.lbl_detected.setStyleSheet("font-size: 10px; color: #555;")
-        det_l.addWidget(self.lbl_detected)
+        det_box.addWidget(self.lbl_detected)
 
         layout.addWidget(det_box)
 
@@ -880,6 +1128,41 @@ class MainWindow(QMainWindow):
         self.btn_propagate.clicked.connect(self._detect_peaks_all_channels)
         prop_l.addWidget(self.btn_propagate)
 
+        sep = QLabel("─────  LYSO internal lines  ─────")
+        sep.setStyleSheet("color: #7b1fa2; font-size: 9px;")
+        sep.setAlignment(Qt.AlignCenter)
+        prop_l.addWidget(sep)
+
+        lyso_win_h = QHBoxLayout()
+        lyso_win_h.addWidget(QLabel("Search window (± ADC):"))
+        self.sb_lyso_window = QSpinBox()
+        self.sb_lyso_window.setRange(5, 2000)
+        self.sb_lyso_window.setValue(80)
+        self.sb_lyso_window.setToolTip(
+            "Search window around predicted ADC position of each Lu-176 line.\n"
+            "The prediction uses the current rough calibration.\n"
+            "Wider = more tolerant of calibration uncertainty.")
+        lyso_win_h.addWidget(self.sb_lyso_window)
+        prop_l.addLayout(lyso_win_h)
+
+        self.btn_lyso_assign = QPushButton("⚡  Auto-assign LYSO lines (88 / 202 / 307 keV)")
+        self.btn_lyso_assign.setEnabled(False)
+        self.btn_lyso_assign.setStyleSheet(
+            "QPushButton { background: #f3e5f5; color: #4a148c; "
+            "border: 1px solid #ce93d8; border-radius: 3px; padding: 3px; }"
+            "QPushButton:hover { background: #e1bee7; }"
+            "QPushButton:disabled { color: #aaa; }")
+        self.btn_lyso_assign.setToolTip(
+            "For every channel tagged as LYSO:\n"
+            "1. Use existing calib points to build a rough calibration\n"
+            "2. Predict ADC positions of 88, 202, 307 keV Lu-176 lines\n"
+            "3. Run TSpectrum in a window around each prediction\n"
+            "4. Add found peaks directly to that channel's calib points\n\n"
+            "Requires ≥ 1 existing calib point per LYSO channel\n"
+            "(e.g. assign 511 keV first, then run this).")
+        self.btn_lyso_assign.clicked.connect(self._auto_assign_lyso_lines)
+        prop_l.addWidget(self.btn_lyso_assign)
+
         self.lbl_prop_status = QLabel("")
         self.lbl_prop_status.setWordWrap(True)
         self.lbl_prop_status.setStyleSheet("font-size: 10px; color: #555;")
@@ -932,7 +1215,14 @@ class MainWindow(QMainWindow):
         self.lbl_bad.setStyleSheet("font-size: 11px;")
         layout.addWidget(self.lbl_bad)
 
-        return panel
+        # ── Wrap in scroll area so nothing is hidden on small screens ── #
+        scroll = QScrollArea()
+        scroll.setWidget(panel)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setFrameShape(scroll.NoFrame)
+        return scroll
 
     def _build_detail_tab(self):
         tab    = QWidget()
@@ -1072,6 +1362,8 @@ class MainWindow(QMainWindow):
         self._detected_positions = []
         self._update_detail_view(ch_id)
         self._update_override_ui(ch_id)
+        self._sync_ch_crystal_combo(ch_id)
+        self._update_lyso_btn_state()
 
     def _prev_channel(self):
         i = self.cb_channel.currentIndex()
@@ -1135,6 +1427,251 @@ class MainWindow(QMainWindow):
     # Peak detection
     # ------------------------------------------------------------------ #
 
+    # ------------------------------------------------------------------ #
+    # Per-channel crystal type
+    # ------------------------------------------------------------------ #
+
+    def _on_ch_crystal_changed(self, idx: int):
+        """Tag the current channel with the selected crystal type."""
+        ch_id = self.current_channel
+        if ch_id < 0:
+            return
+        crystal = self.cb_ch_crystal.currentData()
+        self.channel_crystal[ch_id] = crystal
+        self._refresh_channel_dropdown_colors()
+        # Enable LYSO button if any LYSO channel has calib points
+        self._update_lyso_btn_state()
+        self.statusBar().showMessage(
+            f"Channel {ch_id} tagged as {crystal.upper()}")
+
+    def _tag_all_channels(self, crystal: str):
+        """Tag every loaded channel with the given crystal type."""
+        for ch_id in self.loader.get_channel_ids():
+            self.channel_crystal[ch_id] = crystal
+        # Update current channel combobox to match
+        self.cb_ch_crystal.blockSignals(True)
+        for i in range(self.cb_ch_crystal.count()):
+            if self.cb_ch_crystal.itemData(i) == crystal:
+                self.cb_ch_crystal.setCurrentIndex(i)
+                break
+        self.cb_ch_crystal.blockSignals(False)
+        self._refresh_channel_dropdown_colors()
+        self._update_lyso_btn_state()
+        self.statusBar().showMessage(
+            f"All {len(self.loader.get_channel_ids())} channels tagged as {crystal.upper()}")
+
+    def _refresh_channel_dropdown_colors(self):
+        """Color LYSO channels purple, GAGG channels green in the dropdown."""
+        from PyQt5.QtGui import QColor
+        for i in range(self.cb_channel.count()):
+            ch_id = self.cb_channel.itemData(i)
+            crystal = self.channel_crystal.get(ch_id, "generic")
+            if crystal == "lyso":
+                self.cb_channel.setItemData(i, QColor("#7b1fa2"),
+                                             Qt.ForegroundRole)
+            elif crystal == "gagg":
+                self.cb_channel.setItemData(i, QColor("#1565c0"),
+                                             Qt.ForegroundRole)
+            else:
+                self.cb_channel.setItemData(i, QColor("#212121"),
+                                             Qt.ForegroundRole)
+
+    def _update_lyso_btn_state(self):
+        """Enable the LYSO auto-assign button if ≥1 LYSO channel
+        has at least 1 existing calibration point."""
+        lyso_channels = [ch for ch, c in self.channel_crystal.items()
+                         if c == "lyso"]
+        enabled = any(
+            len(self.peak_mgr.get_peaks(ch)) >= 1
+            for ch in lyso_channels)
+        self.btn_lyso_assign.setEnabled(enabled or bool(lyso_channels))
+
+    def _sync_ch_crystal_combo(self, ch_id: int):
+        """Update the crystal combo to match the stored tag for ch_id."""
+        crystal = self.channel_crystal.get(ch_id, "generic")
+        self.cb_ch_crystal.blockSignals(True)
+        for i in range(self.cb_ch_crystal.count()):
+            if self.cb_ch_crystal.itemData(i) == crystal:
+                self.cb_ch_crystal.setCurrentIndex(i)
+                break
+        self.cb_ch_crystal.blockSignals(False)
+
+    # ------------------------------------------------------------------ #
+    # LYSO auto-assign bootstrap
+    # ------------------------------------------------------------------ #
+
+    def _auto_assign_lyso_lines(self):
+        """
+        For every channel tagged as LYSO:
+
+        1.  Collect existing calib points (assigned by user so far, e.g. 511 keV).
+        2.  Fit a temporary LINEAR calibration from those points
+            (linear is good enough for the bootstrap prediction).
+        3.  Invert it to predict ADC positions of the three Lu-176 lines
+            (88.34, 201.83, 306.78 keV).
+        4.  Run TSpectrum::SearchHighRes in a ± window around each prediction
+            on the SNIP-subtracted spectrum.
+        5.  If a peak is found, add (ADC_found, energy, "Lu-176 XkeV") to
+            that channel's calibration points.
+        6.  Skip any energy that already has a calib point on this channel.
+        """
+        from scipy.optimize import brentq
+        import numpy as np
+
+        LYSO_LINES = [
+            (88.34,  "Lu-176 88keV"),
+            (201.83, "Lu-176 202keV"),
+            (306.78, "Lu-176 307keV"),
+        ]
+
+        lyso_channels = [ch for ch, c in self.channel_crystal.items()
+                         if c == "lyso"]
+        if not lyso_channels:
+            from PyQt5.QtWidgets import QMessageBox
+            QMessageBox.information(self, "No LYSO Channels",
+                "Tag at least one channel as LYSO using the Crystal type "
+                "selector in the Channel panel.")
+            return
+
+        window        = self.sb_lyso_window.value()
+        sigma         = self.sb_sigma.value()
+        threshold     = self.sl_threshold.value() / 100.0
+        max_peaks     = self.sb_max_peaks.value()
+        backend       = self.loader.backend
+        tspec_mode    = self.cb_tspec_mode.currentData()
+        iterations    = self.sb_iterations.value()
+        bg_subtract   = self.chk_bg_subtract.isChecked()
+        bg_iters      = self.sb_bg_iterations.value()
+
+        n_total   = len(lyso_channels)
+        n_ok      = 0
+        n_skip    = 0
+        n_failed  = 0
+        lines_added = 0
+
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, n_total)
+
+        for prog_i, ch_id in enumerate(lyso_channels):
+            self.progress_bar.setValue(prog_i + 1)
+            QApplication.processEvents()
+
+            sp = self.loader.get_spectrum(ch_id)
+            if sp is None:
+                n_failed += 1
+                continue
+
+            existing = self.peak_mgr.get_peaks(ch_id)
+            if not existing:
+                # No calib points at all — can't bootstrap
+                n_skip += 1
+                continue
+
+            # ── Step 1: Build rough linear calibration from existing points ──
+            adcs = np.array([p.adc_position  for p in existing])
+            engs = np.array([p.known_energy   for p in existing])
+
+            if len(adcs) == 1:
+                # Only one point: assume origin passes through (0,0)
+                adcs = np.array([0.0, adcs[0]])
+                engs = np.array([0.0, engs[0]])
+
+            # Least-squares linear fit: E = slope * ADC + intercept
+            try:
+                coeffs = np.polyfit(adcs, engs, 1)   # [slope, intercept]
+                slope, intercept = coeffs
+                if abs(slope) < 1e-9:
+                    n_skip += 1
+                    continue
+                # Inverse: ADC = (E - intercept) / slope
+                def energy_to_adc(e):
+                    return (e - intercept) / slope
+            except Exception:
+                n_skip += 1
+                continue
+
+            # ── Step 2: For each Lu-176 line, predict ADC and search ──────
+            ch_added = 0
+            existing_energies = {p.known_energy for p in existing}
+
+            for target_energy, label in LYSO_LINES:
+                # Skip if already assigned
+                if any(abs(e - target_energy) < 1.0 for e in existing_energies):
+                    continue
+
+                pred_adc = energy_to_adc(target_energy)
+                lo = pred_adc - window
+                hi = pred_adc + window
+
+                # Slice spectrum
+                mask = ((sp.bin_centers >= max(lo, 0)) &
+                        (sp.bin_centers <= hi))
+                if mask.sum() < 5:
+                    continue
+
+                win_centers = sp.bin_centers[mask]
+                win_counts  = sp.counts[mask]
+
+                candidates, _ = PeakManager.detect_peaks(
+                    win_centers, win_counts,
+                    sigma=sigma, threshold=threshold,
+                    max_peaks=max_peaks, backend=backend,
+                    pedestal_cut=0.0,
+                    tspec_mode=tspec_mode, iterations=iterations,
+                    bg_subtract=bg_subtract, bg_iterations=bg_iters)
+
+                if candidates:
+                    # Take closest to prediction
+                    best = min(candidates, key=lambda x: abs(x - pred_adc))
+                else:
+                    # Fallback: centroid of smoothed window
+                    from scipy.ndimage import gaussian_filter1d
+                    sm  = gaussian_filter1d(win_counts.astype(float),
+                                            sigma=max(1, int(sigma)))
+                    idx = int(np.argmax(sm))
+                    hw  = max(2, len(sm) // 8)
+                    sl  = slice(max(0, idx-hw), min(len(sm), idx+hw+1))
+                    w   = sm[sl]; c = win_centers[sl]
+                    best = (float(np.sum(c*w)/w.sum())
+                            if w.sum() > 0 else pred_adc)
+
+                # Remove duplicate at same energy first
+                if ch_id in self.peak_mgr.channel_peaks:
+                    self.peak_mgr.channel_peaks[ch_id] = [
+                        p for p in self.peak_mgr.channel_peaks[ch_id]
+                        if abs(p.known_energy - target_energy) > 0.5]
+
+                self.peak_mgr.add_channel_peak(ch_id, best,
+                                                target_energy, label)
+                ch_added += 1
+                lines_added += 1
+
+            if ch_added > 0:
+                n_ok += 1
+            else:
+                n_skip += 1
+
+        self.progress_bar.setVisible(False)
+        self._refresh_cal_table(self.current_channel)
+        self._update_detail_view(self.current_channel)
+
+        msg = (f"LYSO auto-assign: added {lines_added} line(s) across "
+               f"{n_ok}/{n_total} LYSO channel(s).")
+        if n_skip:
+            msg += f"  ({n_skip} skipped — no calib points yet)"
+        if n_failed:
+            msg += f"  ({n_failed} no spectrum)"
+        self.lbl_prop_status.setText(msg)
+        self.statusBar().showMessage(msg)
+
+    def _on_threshold_changed(self, v: int):
+        """Update label and redraw threshold line live as slider moves."""
+        pct = v               # integer percent
+        self.lbl_threshold.setText(f"{pct}%  of max")
+        # Live-update threshold line on spectrum without re-detecting
+        threshold = v / 100.0
+        self.spectrum_canvas.update_threshold_line(threshold)
+
     def _detect_peaks(self):
         """Phase 1 — detect peaks on current channel. No energy assigned yet."""
         ch_id = self.current_channel
@@ -1147,32 +1684,63 @@ class MainWindow(QMainWindow):
         max_peaks    = self.sb_max_peaks.value()
         pedestal_cut = float(self.sb_pedestal.value())
         backend      = self.loader.backend
+        tspec_mode    = self.cb_tspec_mode.currentData()
+        iterations    = self.sb_iterations.value()
+        bg_subtract   = self.chk_bg_subtract.isChecked()
+        bg_iterations = self.sb_bg_iterations.value()
+        crystal       = self.cb_crystal.currentData()
+        show_known    = self.chk_show_known.isChecked()
 
-        positions = PeakManager.detect_peaks(
+        positions, bg_array = PeakManager.detect_peaks(
             sp.bin_centers, sp.counts,
             sigma=sigma, threshold=threshold,
             max_peaks=max_peaks, backend=backend,
-            pedestal_cut=pedestal_cut)
+            pedestal_cut=pedestal_cut,
+            tspec_mode=tspec_mode, iterations=iterations,
+            bg_subtract=bg_subtract, bg_iterations=bg_iterations)
 
         # Store raw positions in manager (no energy yet)
         self.peak_mgr.set_detected(ch_id, positions)
 
-        if not positions:
-            self.lbl_detected.setText(
-                "No peaks found — try lowering threshold or increasing sigma.")
-            return
-
-        self.lbl_detected.setText(
-            f"{len(positions)} peak(s) detected  "
-            f"[{'TSpectrum' if backend=='pyroot' else 'scipy'}]:\n"
-            + ", ".join(f"{p:.1f}" for p in positions))
-        self.btn_propagate.setEnabled(True)
-
-        self._refresh_detected_table(ch_id)
+        # Always redraw spectrum first
         self.spectrum_canvas.plot_spectrum(
             sp.bin_centers, sp.counts,
             title=f"Channel {ch_id} — {sp.n_entries} entries")
-        self.spectrum_canvas.draw_detected_peaks(positions)
+
+        # Overlay SNIP background if computed
+        if bg_subtract and bg_array is not None:
+            # Align bg_array to bin_centers after pedestal cut
+            bc = sp.bin_centers
+            if pedestal_cut > 0:
+                mask = bc >= pedestal_cut
+                bc   = bc[mask]
+            if len(bc) == len(bg_array):
+                self.spectrum_canvas.draw_background(bc, bg_array)
+
+        self.spectrum_canvas.update_threshold_line(threshold)
+
+        if not positions:
+            self.lbl_detected.setText(
+                "No peaks found — try lowering threshold or sigma.\n"
+                + ("SNIP background subtracted — check orange overlay." if bg_subtract else ""))
+        else:
+            mode_lbl = ("TSpectrum HighRes" if tspec_mode == "highres"
+                        else ("TSpectrum" if backend == "pyroot" else "scipy"))
+            bg_lbl = "  [BG subtracted]" if bg_subtract else ""
+            self.lbl_detected.setText(
+                f"{len(positions)} peak(s) detected  [{mode_lbl}]{bg_lbl}:\n"
+                + ", ".join(f"{p:.1f}" for p in positions))
+            self.btn_propagate.setEnabled(True)
+            self._refresh_detected_table(ch_id)
+            self.spectrum_canvas.draw_detected_peaks(positions)
+
+        # Overlay known crystal lines in ADC space (if calibration available)
+        if show_known and crystal in CRYSTAL_KNOWN_LINES:
+            known = CRYSTAL_KNOWN_LINES[crystal]
+            fit   = self.fit_results.get(ch_id)
+            if known and fit:
+                self.spectrum_canvas.draw_known_lines_adc(known, fit)
+
         assigned = self.peak_mgr.get_peaks(ch_id)
         if assigned:
             self.spectrum_canvas.draw_assigned_peaks(assigned)
@@ -1244,6 +1812,7 @@ class MainWindow(QMainWindow):
         self._refresh_detected_table(ch_id)
         self._refresh_cal_table(ch_id)
         self._update_detail_view(ch_id)
+        self._update_lyso_btn_state()
 
         msg = f"Assigned {eng} keV ({lbl}) at ADC {adc:.1f} on ch {ch_id}. Click Detect → All to propagate."
         self.lbl_prop_status.setText(msg)
@@ -1411,6 +1980,8 @@ class MainWindow(QMainWindow):
         max_peaks    = self.sb_max_peaks.value()
         pedestal_cut = float(self.sb_pedestal.value())
         backend      = self.loader.backend
+        tspec_mode   = self.cb_tspec_mode.currentData()
+        iterations   = self.sb_iterations.value()
 
         n_ok     = 0
         n_excl   = 0
@@ -1449,13 +2020,18 @@ class MainWindow(QMainWindow):
             win_counts  = sp.counts[mask]
 
             # Run TSpectrum / scipy inside the window
-            candidates = PeakManager.detect_peaks(
+            result_tuple = PeakManager.detect_peaks(
                 win_centers, win_counts,
                 sigma        = sigma,
                 threshold    = threshold,
                 max_peaks    = max_peaks,
                 backend      = backend,
-                pedestal_cut = 0.0)   # window already above pedestal
+                pedestal_cut = 0.0,
+                tspec_mode   = tspec_mode,
+                iterations   = iterations,
+                bg_subtract  = self.chk_bg_subtract.isChecked(),
+                bg_iterations= self.sb_bg_iterations.value())
+            candidates = result_tuple[0]  # positions only
 
             if candidates:
                 # Take the candidate closest to the reference ADC
