@@ -13,26 +13,18 @@ Author: Siddharth Parashari
 
 ---
 
-## Features
+## Key Features
 
-- Key Features
-• Dual ROOT backend: PyROOT (native) or uproot (pure Python) — detected automatically.
-• Flexible data loading: TTree filter mode, array-branch mode, custom Draw() expressions, or pre-filled
-TH1 histograms.
-• Three peak detection algorithms: ROOT TSpectrum (standard and HighRes), Sliding Window, and
-SciPy fallback — all with optional Gaussian confirmation.
-• Gaussian peak confirmation: Each detected candidate is verified by a Gaussian fit. Accepted peaks are
-centroid-refined; rejected peaks are shown as red × markers.
-• Peak propagation: Detect peaks on one reference channel and automatically search all other channels
-within a configurable ADC window.
-• Three calibration models: Linear, nonlinear scintillator, 3-point nonlinear variant, plus user-defined
-custom expressions.
-• Detect + Fit All: One-click workflow — detect, propagate, and fit all channels simultaneously in a
-background thread.
-• Calibrated spectrum viewer: Full-range energy spectra using session or file-loaded coefficients.
-• Energy resolution analysis: Interactive Gaussian fitting with multiple background models, FWHM
-extraction, and per-channel trend plots.
-• Rich output: Human-readable calibration log, compact coefficients table, and resolution results file.
+- **Dual ROOT backend:** PyROOT (native) or uproot (pure Python) — detected automatically.
+- **Flexible data loading:** TTree filter mode, array-branch mode, custom Draw() expressions, or pre-filled TH1 histograms.
+- **Three peak detection algorithms:** ROOT TSpectrum (standard and HighRes), Sliding Window, and SciPy fallback — all with optional Gaussian confirmation
+- **Gaussian peak confirmation:** Each detected candidate is verified by a Gaussian fit. Accepted peaks are centroid-refined; rejected peaks are shown as red × markers.
+- **Peak propagation:** Detect peaks on one reference channel and automatically search all other channels within a configurable ADC window.
+- **Three calibration models:** Linear, nonlinear scintillator, 3-point nonlinear variant, plus user-defined custom expressions.
+- **Detect + Fit All:** One-click workflow — detect, propagate, and fit all channels simultaneously in a background thread.
+- **Calibrated spectrum viewer:** Full-range energy spectra using session or file-loaded coefficients.
+- **Energy resolution analysis:** Interactive Gaussian fitting with multiple background models, FWHM extraction, and per-channel trend plots.
+- **Rich output:** Human-readable calibration log, compact coefficients table, and resolution results file.
 
 ---
 
@@ -66,7 +58,7 @@ python main.py
   - Select Branch, ChanelID, and custom user function to populate histograms
   - Select channelID range and number of entries
     
-2. **ROOT TSpectrum Peak Search**
+2. **ROOT TSpectrum Peak Search / SciPy / Sliding Window**
   - Select TSpectrum search parameters suitable for your spectrum
   - Background threshold
   - Sigma (bins)
