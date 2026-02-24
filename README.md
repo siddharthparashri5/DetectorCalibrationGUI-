@@ -2,7 +2,7 @@
 
 A modern, user-friendly graphical interface for Detector Calibration, Resolution calculations and plotting with an auto peak detection feature and functional user override to assign ADC and Energy values. 
 
-![Version](https://img.shields.io/badge/version-1.0-blue)
+![Version](https://img.shields.io/badge/version-2.0-blue)
 ![PyROOT](https://img.shields.io/badge/PyROOT-green)
 ![Python](https://img.shields.io/badge/Python-3.8+-orange)
 
@@ -15,20 +15,24 @@ Author: Siddharth Parashari
 
 ## Features
 
-- Load ROOT files with **TTree** branches or pre-filled **TH1** histograms
-- **Interactive spectrum** viewer — zoom, pan, click to mark peaks
-- **Three peak input modes**: manual click, auto-detection, type known energy
-- **Global peaks** applied to all channels, with per-channel overrides
-- **Linear and Custom func.** Linear or user-defined custom expressions
-- **Batch fit** all channels in a background thread with progress bar
-- **Overview grid** — thumbnail of all spectra, colour-coded by fit quality
-- **Coefficient trend plots** — p0/p1/p2/... vs channel ID
-- **Automatic bad channel flagging** (no peaks, fit failure, poor χ²/NDF)
-- **Two output files** for multi-channel results:
-  - `calibration_log.txt` — full per-channel report
-  - `calibration_coeffs.txt` — compact table for direct analysis use
-- **Calibrated Spectrum visualization**
-- **Resolution calculator and Plotting**
+- Key Features
+• Dual ROOT backend: PyROOT (native) or uproot (pure Python) — detected automatically.
+• Flexible data loading: TTree filter mode, array-branch mode, custom Draw() expressions, or pre-filled
+TH1 histograms.
+• Three peak detection algorithms: ROOT TSpectrum (standard and HighRes), Sliding Window, and
+SciPy fallback — all with optional Gaussian confirmation.
+• Gaussian peak confirmation: Each detected candidate is verified by a Gaussian fit. Accepted peaks are
+centroid-refined; rejected peaks are shown as red × markers.
+• Peak propagation: Detect peaks on one reference channel and automatically search all other channels
+within a configurable ADC window.
+• Three calibration models: Linear, nonlinear scintillator, 3-point nonlinear variant, plus user-defined
+custom expressions.
+• Detect + Fit All: One-click workflow — detect, propagate, and fit all channels simultaneously in a
+background thread.
+• Calibrated spectrum viewer: Full-range energy spectra using session or file-loaded coefficients.
+• Energy resolution analysis: Interactive Gaussian fitting with multiple background models, FWHM
+extraction, and per-channel trend plots.
+• Rich output: Human-readable calibration log, compact coefficients table, and resolution results file.
 
 ---
 
