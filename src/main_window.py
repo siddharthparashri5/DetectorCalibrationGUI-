@@ -926,11 +926,11 @@ class MainWindow(QMainWindow):
         self.cb_ch_crystal.currentIndexChanged.connect(self._on_ch_crystal_changed)
         cryst_tag_h.addWidget(self.cb_ch_crystal, stretch=1)
 
-        self.btn_tag_all_lyso = QPushButton("Tag all → LYSO")
+        self.btn_tag_all_lyso = QPushButton("LYSO")
         self.btn_tag_all_lyso.setToolTip("Mark every channel as LYSO.")
         self.btn_tag_all_lyso.clicked.connect(
             lambda: self._tag_all_channels("lyso"))
-        self.btn_tag_all_gagg = QPushButton("Tag all → GAGG")
+        self.btn_tag_all_gagg = QPushButton("GAGG")
         self.btn_tag_all_gagg.setToolTip("Mark every channel as GAGG.")
         self.btn_tag_all_gagg.clicked.connect(
             lambda: self._tag_all_channels("gagg"))
@@ -942,7 +942,7 @@ class MainWindow(QMainWindow):
         # ── Peak detection ──────────────────────────────────────────── #
         # ── Peak detection (collapsible) ────────────────────────────── #
         det_box = CollapsibleBox("🔍  Peak Detection  (TSpectrum / scipy)",
-                                  collapsed=False)
+                                  collapsed=True)
 
         thresh_h = QHBoxLayout()
         thresh_h.addWidget(QLabel("Threshold:"))
@@ -1000,6 +1000,28 @@ class MainWindow(QMainWindow):
         self.sb_max_peaks.setValue(10)
         maxpk_h.addWidget(self.sb_max_peaks)
         det_box.addLayout(maxpk_h)
+
+        # ── Refinement options ──────────────────────────────────────────── #
+        refine_h = QHBoxLayout()
+        self.chk_refine_peaks = QCheckBox("Refine peaks (sliding + Gaussian fit)")
+        self.chk_refine_peaks.setChecked(True)
+        self.chk_refine_peaks.setToolTip(
+            "After detection, refine peak centers using a sliding window\n"
+            "and local Gaussian fit. Rejects poorly fitted peaks.")
+        refine_h.addWidget(self.chk_refine_peaks)
+        det_box.addLayout(refine_h)
+
+        refwin_h = QHBoxLayout()
+        refwin_h.addWidget(QLabel("Refine window (ADC):"))
+        self.sb_refine_window = QSpinBox()
+        self.sb_refine_window.setRange(5, 200)
+        self.sb_refine_window.setValue(30)
+        self.sb_refine_window.setSingleStep(5)
+        self.sb_refine_window.setToolTip(
+            "Half-width of the local window used for Gaussian refinement.\n"
+            "Typical: 20–50 ADC.")
+        refwin_h.addWidget(self.sb_refine_window)
+        det_box.addLayout(refwin_h)
 
         ped_h = QHBoxLayout()
         ped_h.addWidget(QLabel("Pedestal cut (ADC):"))
@@ -1691,13 +1713,20 @@ class MainWindow(QMainWindow):
         crystal       = self.cb_crystal.currentData()
         show_known    = self.chk_show_known.isChecked()
 
-        positions, bg_array = PeakManager.detect_peaks(
+        
+        refine = self.chk_refine_peaks.isChecked()  # or True for now
+
+        positions, bg_array, refine_info = PeakManager.detect_peaks(
             sp.bin_centers, sp.counts,
             sigma=sigma, threshold=threshold,
             max_peaks=max_peaks, backend=backend,
             pedestal_cut=pedestal_cut,
             tspec_mode=tspec_mode, iterations=iterations,
-            bg_subtract=bg_subtract, bg_iterations=bg_iterations)
+            bg_subtract=bg_subtract, bg_iterations=bg_iterations,
+            refine=refine,
+            refine_window_adc=30.0,
+            max_chi2_ndf=10.0)
+        
 
         # Store raw positions in manager (no energy yet)
         self.peak_mgr.set_detected(ch_id, positions)
@@ -1727,12 +1756,28 @@ class MainWindow(QMainWindow):
             mode_lbl = ("TSpectrum HighRes" if tspec_mode == "highres"
                         else ("TSpectrum" if backend == "pyroot" else "scipy"))
             bg_lbl = "  [BG subtracted]" if bg_subtract else ""
-            self.lbl_detected.setText(
-                f"{len(positions)} peak(s) detected  [{mode_lbl}]{bg_lbl}:\n"
-                + ", ".join(f"{p:.1f}" for p in positions))
+            
+            msg = f"{len(positions)} peak(s) detected  [{mode_lbl}]{bg_lbl}"
+
+            if refine:
+                msg += f"\nRefined with sliding Gaussian fit"
+            if bad:
+                msg += f"\n⚠ {len(bad)} peak(s) rejected (bad fit)"
+
+            msg += "\n" + ", ".join(f"{p:.1f}" for p in positions)
+            self.lbl_detected.setText(msg)
+            
             self.btn_propagate.setEnabled(True)
             self._refresh_detected_table(ch_id)
-            self.spectrum_canvas.draw_detected_peaks(positions)
+            self.spectrum_canvas.draw_detected_peaks(positions, color="green")
+            bad = []
+            # ── NEW: highlight rejected peaks (if refinement enabled) ──────────
+            if refine and refine_info:
+                bad = [r for r in refine_info if not r.success]
+            if bad:
+                bad_adc = [r.adc for r in bad]
+                self.spectrum_canvas.draw_detected_peaks(
+                    bad_adc, color="red", style="x")
 
         # Overlay known crystal lines in ADC space (if calibration available)
         if show_known and crystal in CRYSTAL_KNOWN_LINES:

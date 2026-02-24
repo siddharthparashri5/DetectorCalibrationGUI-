@@ -30,6 +30,14 @@ class Peak:
     label:         str  = ""
     auto_detected: bool = False
 
+@dataclass
+class RefinedPeakResult:
+    adc: float
+    sigma: float
+    amplitude: float
+    chi2_ndf: float
+    success: bool
+    reason: str = ""
 
 # Known internal emission lines for crystal types (energy in keV)
 CRYSTAL_KNOWN_LINES = {
@@ -201,6 +209,66 @@ class PeakManager:
                          auto_detected=True))
                 updated.append(ch_id)
         return updated
+
+    def refine_detected_peaks_sliding_gauss(self,
+                                        channel_id: int,
+                                        bin_centers: np.ndarray,
+                                        counts: np.ndarray,
+                                        window_adc: float = 30.0,
+                                        max_chi2_ndf: float = 10.0,
+                                        dedup_tol: float = 5.0
+                                        ) -> list[RefinedPeakResult]:
+        """
+        Refine detected peaks for one channel using:
+        sliding window → local max → Gaussian fit
+
+        Updates detected_positions[channel_id] in-place.
+    
+        Returns list of refinement results (good + rejected).
+        """
+
+        raw = self.detected_positions.get(channel_id, [])
+        if not raw:
+            return []
+
+        refined = []
+        accepted_adc = []
+
+        for adc0 in raw:
+            # Sliding max
+            mask = (bin_centers >= adc0 - window_adc) & \
+                   (bin_centers <= adc0 + window_adc)
+            if not np.any(mask):
+                continue
+
+            local_x = bin_centers[mask]
+            local_y = counts[mask]
+            peak_adc = local_x[np.argmax(local_y)]
+
+            res = self._fit_gaussian(
+                bin_centers, counts, peak_adc, window_adc)
+
+            if not res.success:
+                refined.append(res)
+                continue
+
+            if np.isfinite(res.chi2_ndf) and res.chi2_ndf > max_chi2_ndf:
+                res.success = False
+                res.reason  = "Bad χ²/NDF"
+                refined.append(res)
+                continue
+
+            # Deduplicate
+            if any(abs(res.adc - a) < dedup_tol for a in accepted_adc):
+                continue
+
+            accepted_adc.append(res.adc)
+            refined.append(res)
+
+        # Replace detected positions with refined good peaks
+        self.detected_positions[channel_id] = sorted(accepted_adc)
+
+        return refined
 
     # ------------------------------------------------------------------ #
     # Peak detection — TSpectrum (PyROOT)
@@ -382,32 +450,173 @@ class PeakManager:
         return sorted(positions)
 
     # ------------------------------------------------------------------ #
+    # Fit peaks with gaussian for refinement
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _fit_gaussian(bin_centers, counts, center, window):
+        """
+        Local Gaussian fit around 'center'.
+        Returns RefinedPeakResult.
+        """
+        mask = (bin_centers >= center - window) & \
+               (bin_centers <= center + window)
+
+        x = bin_centers[mask]
+        y = counts[mask]
+
+        if len(x) < 5 or y.max() <= 0:
+            return RefinedPeakResult(center, np.nan, 0, np.nan,
+                                 False, "Insufficient data")
+
+        # Initial guesses
+        amp0 = y.max()
+        mu0  = x[y.argmax()]
+        sig0 = window / 4
+
+        # Try ROOT first if available
+        try:
+            import ROOT
+            h = ROOT.TH1F("tmp", "", len(x), float(x[0]), float(x[-1]))
+            h.SetDirectory(ROOT.nullptr)
+            for i, c in enumerate(y):
+                h.SetBinContent(i + 1, float(c))
+
+            f = ROOT.TF1("g", "gaus", float(x[0]), float(x[-1]))
+            f.SetParameters(amp0, mu0, sig0)
+
+            status = h.Fit(f, "RQ0")
+            if status != 0:
+                raise RuntimeError("ROOT fit failed")
+
+            chi2 = f.GetChisquare()
+            ndf  = f.GetNDF()
+            chi2_ndf = chi2 / ndf if ndf > 0 else np.nan
+
+            return RefinedPeakResult(
+                adc=f.GetParameter(1),
+                sigma=abs(f.GetParameter(2)),
+                amplitude=f.GetParameter(0),
+                chi2_ndf=chi2_ndf,
+                success=True
+            )
+
+        except Exception:
+            # scipy fallback
+            from scipy.optimize import curve_fit
+
+            def gaus(x, A, mu, sig):
+                return A * np.exp(-(x - mu) ** 2 / (2 * sig ** 2))
+
+            try:
+                popt, pcov = curve_fit(
+                    gaus, x, y, p0=[amp0, mu0, sig0], maxfev=5000)
+                residuals = y - gaus(x, *popt)
+                chi2 = np.sum(residuals ** 2)
+                ndf  = len(y) - 3
+                chi2_ndf = chi2 / ndf if ndf > 0 else np.nan
+
+                return RefinedPeakResult(
+                    adc=popt[1],
+                    sigma=abs(popt[2]),
+                    amplitude=popt[0],
+                    chi2_ndf=chi2_ndf,
+                    success=True
+                )
+
+            except Exception:
+                return RefinedPeakResult(center, np.nan, 0, np.nan,
+                                     False, "Fit failed")
+    
+
+    # ------------------------------------------------------------------ #
     # Auto-detect dispatcher
     # ------------------------------------------------------------------ #
 
     @staticmethod
     def detect_peaks(bin_centers: np.ndarray,
-                      counts: np.ndarray,
-                      sigma: float = 2.0,
-                      threshold: float = 0.05,
-                      max_peaks: int = 10,
-                      backend: str = "pyroot",
-                      pedestal_cut: float = 0.0,
-                      tspec_mode: str = "highres",
-                      iterations: int = 10,
-                      bg_subtract: bool = True,
-                      bg_iterations: int = 20,
-                      ) -> tuple[list[float], np.ndarray | None]:
-        """Dispatch to TSpectrum (standard or HighRes) or scipy.
-        Returns (positions, bg_array) — bg_array is None for scipy."""
+                  counts: np.ndarray,
+                  sigma: float = 2.0,
+                  threshold: float = 0.05,
+                  max_peaks: int = 10,
+                  backend: str = "pyroot",
+                  pedestal_cut: float = 0.0,
+                  tspec_mode: str = "highres",
+                  iterations: int = 10,
+                  bg_subtract: bool = True,
+                  bg_iterations: int = 20,
+                  refine: bool = False,
+                  refine_window_adc: float = 30.0,
+                  max_chi2_ndf: float = 10.0,
+                  ):
+        """
+        Peak detection dispatcher.
+    
+        Phase 1:
+            - TSpectrum (standard / highres) or scipy
+            - returns raw ADC peak positions
+
+        Optional Phase 1b (refine=True):
+        - sliding window local maximum
+        - Gaussian fit
+        - reject bad fits
+
+        Returns:
+        positions : list[float]
+        bg_array  : np.ndarray | None
+        refine_results : list[RefinedPeakResult] | None
+        """
+
+        # ── Phase 1: coarse detection ───────────────────────────────
         if backend == "pyroot":
-            return PeakManager.detect_peaks_tspectrum(
+            positions, bg_array = PeakManager.detect_peaks_tspectrum(
                 bin_centers, counts, sigma, threshold, max_peaks,
                 pedestal_cut=pedestal_cut,
-                tspec_mode=tspec_mode, iterations=iterations,
-                bg_subtract=bg_subtract, bg_iterations=bg_iterations)
+                tspec_mode=tspec_mode,
+                iterations=iterations,
+                bg_subtract=bg_subtract,
+                bg_iterations=bg_iterations)
         else:
             positions = PeakManager.detect_peaks_scipy(
                 bin_centers, counts, sigma, threshold, max_peaks,
                 pedestal_cut=pedestal_cut)
-            return positions, None
+            bg_array = None
+
+        if not refine or not positions:
+            return positions, bg_array, None
+
+        # ── Phase 1b: refinement ────────────────────────────────────
+        refine_results = []
+        refined_positions = []
+
+        for adc0 in positions:
+            # sliding window
+            mask = (bin_centers >= adc0 - refine_window_adc) & \
+                   (bin_centers <= adc0 + refine_window_adc)
+            if not np.any(mask):
+                continue
+
+            local_x = bin_centers[mask]
+            local_y = counts[mask]
+            peak_adc = local_x[np.argmax(local_y)]
+
+            res = PeakManager._fit_gaussian(
+                bin_centers, counts, peak_adc, refine_window_adc)
+
+            if not res.success:
+                refine_results.append(res)
+                continue
+
+            if np.isfinite(res.chi2_ndf) and res.chi2_ndf > max_chi2_ndf:
+                res.success = False
+                res.reason  = "Bad χ²/NDF"
+                refine_results.append(res)
+                continue
+
+            refined_positions.append(res.adc)
+            refine_results.append(res)
+
+        # de-duplicate
+        refined_positions = sorted(set(refined_positions))
+
+        return refined_positions, bg_array, refine_results

@@ -101,7 +101,7 @@ class CalibSpectrumEngine:
     def apply(self, channel_id: int,
                bin_centers: np.ndarray,
                counts: np.ndarray,
-               out_bins: int = 1024,
+               out_bins: int = 200,
                e_min: float = 0.0,
                e_max: float = 0.0,
                ) -> Optional[CalibratedSpectrum]:
