@@ -548,7 +548,7 @@ class LoadDialog(QDialog):
         layout.addWidget(self.tree_group)
 
         # Channel range — only shown for array/custom modes
-        self.ch_range_box = QGroupBox("Channel Range")
+        self.ch_range_box = QGroupBox("Channel Range (Optional; if specific channels required)")
         cr = QFormLayout(self.ch_range_box)
 
         range_h = QHBoxLayout()
@@ -696,7 +696,9 @@ class AssignEnergyDialog(QDialog):
         ("511.0",   "Na-22 / annihilation"),
         ("1274.5",  "Na-22"),
         ("661.7",   "Cs-137"),
-        ("1332.5",  "Co-60"),
+        ("88",  "Lu-176"),
+        ("202",  "Lu-176"),
+        ("307",  "Lu-176"),
         ("1173.2",  "Co-60"),
         ("122.1",   "Co-57"),
         ("344.3",   "Eu-152"),
@@ -791,8 +793,8 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("DetectorCalibGUI — Energy Calibration & Resolution")
-        self.setMinimumSize(1350, 880)
+        self.setWindowTitle("Detector Energy Calibration & Resolution")
+        self.setMinimumSize(1150, 980)
 
         self.loader           = ROOTFileLoader()
         self.peak_mgr         = PeakManager()
@@ -891,7 +893,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(10)
 
         # ── Channel navigation ──────────────────────────────────────── #
-        nav_box = QGroupBox("Channel")
+        nav_box = QGroupBox("Channel Navigator")
         nav_l   = QVBoxLayout(nav_box)
         nav_h   = QHBoxLayout()
         self.btn_prev = QPushButton("◀")
@@ -910,7 +912,7 @@ class MainWindow(QMainWindow):
         self.lbl_ch_info.setWordWrap(True)
         self.lbl_ch_info.setStyleSheet("font-size: 11px; color: #424242;")
         nav_l.addWidget(self.lbl_ch_info)
-
+        
         # ── Per-channel crystal type tag ──────────────────────────── #
         cryst_tag_h = QHBoxLayout()
         cryst_tag_h.addWidget(QLabel("Crystal type:"))
@@ -926,19 +928,21 @@ class MainWindow(QMainWindow):
         self.cb_ch_crystal.currentIndexChanged.connect(self._on_ch_crystal_changed)
         cryst_tag_h.addWidget(self.cb_ch_crystal, stretch=1)
 
-        self.btn_tag_all_lyso = QPushButton("LYSO")
+        self.btn_tag_all_lyso = QPushButton("Tag all → LYSO")
         self.btn_tag_all_lyso.setToolTip("Mark every channel as LYSO.")
         self.btn_tag_all_lyso.clicked.connect(
             lambda: self._tag_all_channels("lyso"))
-        self.btn_tag_all_gagg = QPushButton("GAGG")
+        self.btn_tag_all_gagg = QPushButton("Tag all → GAGG")
         self.btn_tag_all_gagg.setToolTip("Mark every channel as GAGG.")
         self.btn_tag_all_gagg.clicked.connect(
             lambda: self._tag_all_channels("gagg"))
         cryst_tag_h.addWidget(self.btn_tag_all_lyso)
         cryst_tag_h.addWidget(self.btn_tag_all_gagg)
-        nav_l.addLayout(cryst_tag_h)
-        layout.addWidget(nav_box)
+        #nav_l.addLayout(cryst_tag_h)
+        
 
+        layout.addWidget(nav_box)
+        
         # ── Peak detection ──────────────────────────────────────────── #
         # ── Peak detection (collapsible) ────────────────────────────── #
         det_box = CollapsibleBox("🔍  Peak Detection  (TSpectrum / scipy)",
@@ -1001,28 +1005,6 @@ class MainWindow(QMainWindow):
         maxpk_h.addWidget(self.sb_max_peaks)
         det_box.addLayout(maxpk_h)
 
-        # ── Refinement options ──────────────────────────────────────────── #
-        refine_h = QHBoxLayout()
-        self.chk_refine_peaks = QCheckBox("Refine peaks (sliding + Gaussian fit)")
-        self.chk_refine_peaks.setChecked(True)
-        self.chk_refine_peaks.setToolTip(
-            "After detection, refine peak centers using a sliding window\n"
-            "and local Gaussian fit. Rejects poorly fitted peaks.")
-        refine_h.addWidget(self.chk_refine_peaks)
-        det_box.addLayout(refine_h)
-
-        refwin_h = QHBoxLayout()
-        refwin_h.addWidget(QLabel("Refine window (ADC):"))
-        self.sb_refine_window = QSpinBox()
-        self.sb_refine_window.setRange(5, 200)
-        self.sb_refine_window.setValue(30)
-        self.sb_refine_window.setSingleStep(5)
-        self.sb_refine_window.setToolTip(
-            "Half-width of the local window used for Gaussian refinement.\n"
-            "Typical: 20–50 ADC.")
-        refwin_h.addWidget(self.sb_refine_window)
-        det_box.addLayout(refwin_h)
-
         ped_h = QHBoxLayout()
         ped_h.addWidget(QLabel("Pedestal cut (ADC):"))
         self.sb_pedestal = QSpinBox()
@@ -1050,7 +1032,7 @@ class MainWindow(QMainWindow):
         bg_h.addWidget(QLabel("iter:"))
         bg_h.addWidget(self.sb_bg_iterations)
         det_box.addLayout(bg_h)
-
+        """
         cryst_h = QHBoxLayout()
         cryst_h.addWidget(QLabel("Crystal:"))
         self.cb_crystal = QComboBox()
@@ -1064,6 +1046,7 @@ class MainWindow(QMainWindow):
         self.chk_show_known.setChecked(True)
         cryst_h.addWidget(self.chk_show_known)
         det_box.addLayout(cryst_h)
+        """
 
         self.btn_detect = QPushButton("\U0001f50d  Detect Peaks (Current channel)")
         self.btn_detect.setEnabled(False)
@@ -1149,11 +1132,13 @@ class MainWindow(QMainWindow):
         self.btn_propagate.setEnabled(False)
         self.btn_propagate.clicked.connect(self._detect_peaks_all_channels)
         prop_l.addWidget(self.btn_propagate)
+        layout.addWidget(prop_box)
 
         sep = QLabel("─────  LYSO internal lines  ─────")
+        det_box = CollapsibleBox("🔍  LYSO internal lines",collapsed=True)
         sep.setStyleSheet("color: #7b1fa2; font-size: 9px;")
         sep.setAlignment(Qt.AlignCenter)
-        prop_l.addWidget(sep)
+        det_box.addWidget(sep)
 
         lyso_win_h = QHBoxLayout()
         lyso_win_h.addWidget(QLabel("Search window (± ADC):"))
@@ -1165,7 +1150,7 @@ class MainWindow(QMainWindow):
             "The prediction uses the current rough calibration.\n"
             "Wider = more tolerant of calibration uncertainty.")
         lyso_win_h.addWidget(self.sb_lyso_window)
-        prop_l.addLayout(lyso_win_h)
+        det_box.addLayout(lyso_win_h)
 
         self.btn_lyso_assign = QPushButton("⚡  Auto-assign LYSO lines (88 / 202 / 307 keV)")
         self.btn_lyso_assign.setEnabled(False)
@@ -1183,13 +1168,14 @@ class MainWindow(QMainWindow):
             "Requires ≥ 1 existing calib point per LYSO channel\n"
             "(e.g. assign 511 keV first, then run this).")
         self.btn_lyso_assign.clicked.connect(self._auto_assign_lyso_lines)
-        prop_l.addWidget(self.btn_lyso_assign)
+        det_box.addWidget(self.btn_lyso_assign)
 
         self.lbl_prop_status = QLabel("")
         self.lbl_prop_status.setWordWrap(True)
         self.lbl_prop_status.setStyleSheet("font-size: 10px; color: #555;")
-        prop_l.addWidget(self.lbl_prop_status)
-        layout.addWidget(prop_box)
+        det_box.addWidget(self.lbl_prop_status)
+
+        layout.addWidget(det_box)
 
         # ── Calibration points table ─────────────────────────────── #
         cal_box = QGroupBox("Calibration Points (Current channel)")
@@ -1307,6 +1293,7 @@ class MainWindow(QMainWindow):
             return
         try:
             info = self.loader.open(path)
+            
         except RuntimeError as e:
             QMessageBox.critical(self, "Backend Error", str(e))
             return
@@ -1359,6 +1346,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"Loaded {n} channel(s) from {os.path.basename(path)}"
             f"  [{backend} backend]")
+        
 
     def _populate_channel_combo(self):
         self.cb_channel.blockSignals(True)
@@ -1426,10 +1414,13 @@ class MainWindow(QMainWindow):
 
         n_det = len(self.peak_mgr.get_detected(ch_id))
         excl  = " ⛔ excluded" if self.peak_mgr.is_excluded(ch_id) else ""
-        info  = (f"Entries  : {sp.n_entries}\n"
-                 f"Source   : {sp.source}\n"
-                 f"Detected : {n_det} peak(s)\n"
-                 f"Cal pts  : {self.peak_mgr.n_calibration_points(ch_id)}{excl}")
+        
+        info = (f"File Loaded "
+                f"→ click  peak Detection or Assign Peaks Manually\n"
+                f"Entries  : {sp.n_entries}\n"
+                f"Source   : {sp.source}\n"
+                f"Detected : {n_det} peak(s)\n"
+                f"Cal pts  : {self.peak_mgr.n_calibration_points(ch_id)}{excl}")
         r = self.fit_results.get(ch_id)
         if r:
             status = "❌ BAD" if r.bad_channel else "✅ OK"
@@ -1437,6 +1428,9 @@ class MainWindow(QMainWindow):
             info  += f"\nFit     : {status}  χ²/NDF={chi2_s}"
             if r.note:
                 info += f"\nNote    : {r.note[:60]}"
+       
+        self.lbl_ch_info.setStyleSheet("font-size: 10px; color: #226; font-weight: bold; "
+            "background: #eef; border-radius: 3px; padding: 2px;")
         self.lbl_ch_info.setText(info)
 
     def _update_override_ui(self, ch_id: int):
@@ -1452,19 +1446,20 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
     # Per-channel crystal type
     # ------------------------------------------------------------------ #
-
+    
     def _on_ch_crystal_changed(self, idx: int):
         """Tag the current channel with the selected crystal type."""
         ch_id = self.current_channel
         if ch_id < 0:
             return
-        crystal = self.cb_ch_crystal.currentData()
+        crystal = self.cb_ch_crystal.currentData()    ## if GAGG, LYSO
         self.channel_crystal[ch_id] = crystal
         self._refresh_channel_dropdown_colors()
         # Enable LYSO button if any LYSO channel has calib points
         self._update_lyso_btn_state()
         self.statusBar().showMessage(
             f"Channel {ch_id} tagged as {crystal.upper()}")
+
 
     def _tag_all_channels(self, crystal: str):
         """Tag every loaded channel with the given crystal type."""
@@ -1517,6 +1512,7 @@ class MainWindow(QMainWindow):
                 self.cb_ch_crystal.setCurrentIndex(i)
                 break
         self.cb_ch_crystal.blockSignals(False)
+
 
     # ------------------------------------------------------------------ #
     # LYSO auto-assign bootstrap
@@ -1713,20 +1709,13 @@ class MainWindow(QMainWindow):
         crystal       = self.cb_crystal.currentData()
         show_known    = self.chk_show_known.isChecked()
 
-        
-        refine = self.chk_refine_peaks.isChecked()  # or True for now
-
-        positions, bg_array, refine_info = PeakManager.detect_peaks(
+        positions, bg_array = PeakManager.detect_peaks(
             sp.bin_centers, sp.counts,
             sigma=sigma, threshold=threshold,
             max_peaks=max_peaks, backend=backend,
             pedestal_cut=pedestal_cut,
             tspec_mode=tspec_mode, iterations=iterations,
-            bg_subtract=bg_subtract, bg_iterations=bg_iterations,
-            refine=refine,
-            refine_window_adc=30.0,
-            max_chi2_ndf=10.0)
-        
+            bg_subtract=bg_subtract, bg_iterations=bg_iterations)
 
         # Store raw positions in manager (no energy yet)
         self.peak_mgr.set_detected(ch_id, positions)
@@ -1756,28 +1745,12 @@ class MainWindow(QMainWindow):
             mode_lbl = ("TSpectrum HighRes" if tspec_mode == "highres"
                         else ("TSpectrum" if backend == "pyroot" else "scipy"))
             bg_lbl = "  [BG subtracted]" if bg_subtract else ""
-            
-            msg = f"{len(positions)} peak(s) detected  [{mode_lbl}]{bg_lbl}"
-
-            if refine:
-                msg += f"\nRefined with sliding Gaussian fit"
-            if bad:
-                msg += f"\n⚠ {len(bad)} peak(s) rejected (bad fit)"
-
-            msg += "\n" + ", ".join(f"{p:.1f}" for p in positions)
-            self.lbl_detected.setText(msg)
-            
+            self.lbl_detected.setText(
+                f"{len(positions)} peak(s) detected  [{mode_lbl}]{bg_lbl}:\n"
+                + ", ".join(f"{p:.1f}" for p in positions))
             self.btn_propagate.setEnabled(True)
             self._refresh_detected_table(ch_id)
-            self.spectrum_canvas.draw_detected_peaks(positions, color="green")
-            bad = []
-            # ── NEW: highlight rejected peaks (if refinement enabled) ──────────
-            if refine and refine_info:
-                bad = [r for r in refine_info if not r.success]
-            if bad:
-                bad_adc = [r.adc for r in bad]
-                self.spectrum_canvas.draw_detected_peaks(
-                    bad_adc, color="red", style="x")
+            self.spectrum_canvas.draw_detected_peaks(positions)
 
         # Overlay known crystal lines in ADC space (if calibration available)
         if show_known and crystal in CRYSTAL_KNOWN_LINES:

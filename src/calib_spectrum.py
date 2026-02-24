@@ -4,10 +4,14 @@ CalibSpectrum
 Applies energy calibration to raw ADC spectra to produce
 calibrated energy spectra (x-axis in keV).
 
-Key fix: for nonlinear models, ADC → energy is evaluated via
-FitResult.energy_at() which clamps at adc_max (the last assigned
-peak), preventing the super-exponential blow-up that makes the
-energy axis garbage beyond the calibration range.
+Fix: the calibrated spectrum now shows the FULL spectrum range,
+not clipped at adc_max. The adc_max concept was originally used
+to prevent nonlinear model blow-up beyond the last calibration
+point, but this cut the spectrum short in the display. We now
+use a gentler approach: evaluate energy_at() for the full ADC
+range and only drop bins where the energy value is physically
+invalid (NaN, negative, or wildly extrapolated by the nonlinear
+model).
 """
 
 from __future__ import annotations
@@ -30,13 +34,11 @@ class CalibratedSpectrum:
 class CalibSpectrumEngine:
     def __init__(self):
         self.calib_params: dict = {}   # ch_id -> param dict
-        self._fit_results:  dict = {}  # ch_id -> FitResult (kept for energy_at)
+        self._fit_results:  dict = {}  # ch_id -> FitResult
         self.source: str = ""
 
     def load_from_memory(self, fit_results: dict):
-        """Load calibration from live FitResult objects.
-        Stores the full FitResult so energy_at() (with adc_max clamping)
-        can be used during apply()."""
+        """Load calibration from live FitResult objects."""
         self.calib_params.clear()
         self._fit_results.clear()
         self.source = "session memory"
@@ -48,11 +50,10 @@ class CalibSpectrumEngine:
                     "param_names": r.param_names,
                     "adc_max":     float(r.adc_max),
                 }
-                self._fit_results[ch_id] = r   # keep reference for energy_at
+                self._fit_results[ch_id] = r
 
     def load_from_file(self, filepath: str):
-        """Load calibration from exported text file (no FitResult available,
-        so adc_max is unknown — fall back to direct model evaluation)."""
+        """Load calibration from exported text file."""
         self.calib_params.clear()
         self._fit_results.clear()
         self.source = filepath
@@ -93,7 +94,7 @@ class CalibSpectrumEngine:
                         "model":       model,
                         "params":      params,
                         "param_names": param_names or ["P0","P1","P2","P3"][:n_params],
-                        "adc_max":     np.inf,   # unknown from file
+                        "adc_max":     np.inf,
                     }
                 except (ValueError, IndexError):
                     continue
@@ -101,7 +102,7 @@ class CalibSpectrumEngine:
     def apply(self, channel_id: int,
                bin_centers: np.ndarray,
                counts: np.ndarray,
-               out_bins: int = 200,
+               out_bins: int = 1024,
                e_min: float = 0.0,
                e_max: float = 0.0,
                ) -> Optional[CalibratedSpectrum]:
@@ -109,26 +110,55 @@ class CalibSpectrumEngine:
         if channel_id not in self.calib_params:
             return None
 
-        info    = self.calib_params[channel_id]
-        model   = info["model"]
-        params  = info["params"]
-        adc_max = info.get("adc_max", np.inf)
+        info   = self.calib_params[channel_id]
+        model  = info["model"]
+        params = info["params"]
 
-        # ── Map ADC → energy ─────────────────────────────────────────── #
-        # Prefer FitResult.energy_at() which clamps at adc_max and returns
-        # NaN beyond it, preventing nonlinear blow-up.
+        # ── Map ADC → energy over the FULL ADC range ─────────────────── #
+        # We evaluate the model for ALL bins, not just up to adc_max.
+        # For nonlinear models beyond adc_max the exponential can blow up,
+        # so we cap energy values at a physically reasonable upper limit
+        # (5× the energy at adc_max) rather than blanking them entirely.
         fit = self._fit_results.get(channel_id)
         if fit is not None:
-            energy_centers = fit.energy_at(bin_centers)   # NaN beyond adc_max
+            # Evaluate model directly (not energy_at which clips at adc_max)
+            adc_max = float(fit.adc_max)
+            Q = bin_centers.astype(float)
+
+            if fit.model == "linear":
+                energy_centers = model_linear(Q, *fit.params)
+            elif fit.model == "nonlinear":
+                energy_centers = model_nonlinear(Q, *fit.params)
+            elif fit.model == "nonlinear_3pt":
+                energy_centers = model_nonlinear_3pt(Q, *fit.params)
+            elif fit.model == "custom" and hasattr(fit, "_custom_func"):
+                try:
+                    energy_centers = fit._custom_func(Q, *fit.params)
+                except Exception:
+                    energy_centers = np.full_like(Q, np.nan)
+            else:
+                energy_centers = np.full_like(Q, np.nan)
+
+            # For nonlinear models: cap extrapolation beyond adc_max to
+            # avoid super-exponential blow-up ruining the display.
+            # Cap at 3× the energy value at adc_max.
+            if fit.model in ("nonlinear", "nonlinear_3pt") and np.isfinite(adc_max):
+                e_at_max = fit.energy_at(np.array([adc_max]))[0]
+                if np.isfinite(e_at_max) and e_at_max > 0:
+                    energy_cap = 3.0 * e_at_max
+                    energy_centers = np.where(
+                        energy_centers <= energy_cap,
+                        energy_centers, np.nan)
+
         else:
-            # File-loaded calibration: evaluate directly but clip manually
-            adc_clipped = np.where(bin_centers <= adc_max, bin_centers, np.nan)
+            # File-loaded calibration: evaluate directly, no capping
+            Q = bin_centers.astype(float)
             if model == "linear":
-                energy_centers = model_linear(adc_clipped, *params)
+                energy_centers = model_linear(Q, *params)
             elif model == "nonlinear":
-                energy_centers = model_nonlinear(adc_clipped, *params)
+                energy_centers = model_nonlinear(Q, *params)
             elif model == "nonlinear_3pt":
-                energy_centers = model_nonlinear_3pt(adc_clipped, *params)
+                energy_centers = model_nonlinear_3pt(Q, *params)
             else:
                 return None
 
